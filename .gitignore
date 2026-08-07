@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# tuning/ — Terraform
+# ---------------------------------------------------------------------------
+
+# State. This is the single most important line in this file. Terraform state
+# is a plaintext record of everything it built, and for some resource types it
+# contains secrets that were never secret in the .tf files themselves. It is
+# also the thing that makes `terraform destroy` possible — lose it and you own
+# orphaned cloud resources that quietly eat the Always Free quota.
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+
+# The provider plugin cache — hundreds of MB of downloaded binaries that
+# `terraform init` recreates on demand. Never belongs in git.
+.terraform/
+
+# Real variable values: OCIDs, key fingerprints, key paths, my home IP.
+# The committed template is tuning/terraform.tfvars.example.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Saved plan files are binary and can embed variable values.
+*.tfplan
+crash.log
+crash.*.log
+
+# .terraform.lock.hcl is deliberately NOT ignored — it pins provider versions
+# and hashes, and committing it is what makes builds reproducible for anyone
+# who clones this.
+
+# ---------------------------------------------------------------------------
+# rehearsal/ — Ansible
+# ---------------------------------------------------------------------------
+
+# The generated inventory holds the live public IP and my SSH key path.
+# The committed template is rehearsal/inventory.example.ini.
+rehearsal/inventory.ini
+*.retry
+
+# ---------------------------------------------------------------------------
+# backstage/ — secrets
+# ---------------------------------------------------------------------------
+
+# The age private key. SOPS-encrypted files are safe to commit *because* this
+# never is. Belongs in ~/.config/sops/age/, not here — this pattern is a
+# tripwire for the day I get careless.
+*.agekey
+key.txt
+age-key.txt
+
+# Anything decrypted for local use. Only *.enc.yaml belongs in git.
+*.dec.yaml
+*.dec.yml
+
+# ---------------------------------------------------------------------------
+# Keys and credentials, anywhere in the tree
+# ---------------------------------------------------------------------------
+*.pem
+*.key
+!**/*.pub
+oci_api_key*
+.oci/
+
+# ---------------------------------------------------------------------------
+# maestro/ — Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# ---------------------------------------------------------------------------
+# Editor and OS noise
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

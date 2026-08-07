@@ -1,0 +1,77 @@
+# =============================================================================
+# tuning / terraform.tfvars.example
+# =============================================================================
+#
+# Copy this to terraform.tfvars and fill in your own values:
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# terraform.tfvars is gitignored. This template is not. Nothing that would be
+# awkward to publish belongs in the file you create — and nothing here needs
+# to be: your actual credentials (the RSA private key that signs API requests)
+# live in ~/.oci/config and are read by the provider directly.
+#
+# OCIDs are account identifiers, not secrets — they identify, they don't
+# authenticate. They're kept out of git anyway, on the general principle that
+# a portfolio repo shouldn't hand a stranger a map of your tenancy.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Required
+# -----------------------------------------------------------------------------
+
+# OCI Console -> Profile (top right) -> Tenancy. Also already sitting in
+# ~/.oci/config as `tenancy=`.
+tenancy_ocid = "ocid1.tenancy.oc1..aaaaaaaaREPLACEME"
+
+
+# -----------------------------------------------------------------------------
+# Usually worth setting
+# -----------------------------------------------------------------------------
+
+# Your tenancy's HOME region — Always Free resources can only exist there.
+# Leave commented out to inherit whatever ~/.oci/config says.
+# region = "sa-saopaulo-1"
+
+# Path to the PUBLIC key. The private half stays where it is and is never read
+# by Terraform. Generate a pair with:
+#   ssh-keygen -t ed25519 -C "ensemble" -f ~/.ssh/ensemble_ed25519
+# ssh_public_key_path = "~/.ssh/ensemble_ed25519.pub"
+
+
+# -----------------------------------------------------------------------------
+# Optional — defaults are already the Always Free sweet spot
+# -----------------------------------------------------------------------------
+
+# Root compartment by default, which is normal for a personal account.
+# compartment_ocid = "ocid1.compartment.oc1..aaaaaaaaREPLACEME"
+
+# 2 OCPU / 12 GB is what the free grant covers running 24/7. Raising these is
+# what enforce_always_free exists to stop you doing by accident — see
+# variables.tf for the OCPU-hour arithmetic.
+# instance_ocpus       = 2
+# instance_memory_gbs  = 12
+# boot_volume_size_gbs = 100
+
+# Bump to 1 or 2 if apply fails with "Out of host capacity" and your region has
+# more than one availability domain.
+# availability_domain_index = 0
+
+
+# -----------------------------------------------------------------------------
+# Networking — narrow these if you can
+# -----------------------------------------------------------------------------
+
+# Your current public address, if it's static enough to rely on:
+#   curl -s https://ifconfig.me
+#
+# Both default to 0.0.0.0/0. SSH is defensible that way because `rehearsal`
+# hardens sshd properly; the Kubernetes API is the one genuinely worth
+# narrowing, since nothing rate-limits it.
+# ssh_allowed_cidr      = "203.0.113.4/32"
+# kube_api_allowed_cidr = "203.0.113.4/32"
+
+# 80/443 for the K3s ingress controller. Set false until there's something
+# worth serving.
+# open_http_ports = true
