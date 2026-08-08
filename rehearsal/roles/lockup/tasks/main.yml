@@ -1,0 +1,134 @@
+---
+# =============================================================================
+# lockup — secure the building
+# =============================================================================
+#
+# Three things: sshd hardening, automatic security patching, and fail2ban.
+#
+# This role is what makes layer 1's decision to expose port 22 to the whole
+# internet defensible. That default is uncomfortable and deliberate — home
+# connections have dynamic addresses, and locking yourself out of a cloud VM
+# with no serial console is worse than a well-configured sshd being reachable.
+# "Well-configured" is this role's job, and the two layers only work together:
+# a wide security list in front of a hardened daemon is a reasonable position,
+# a wide security list in front of a default daemon is not.
+# =============================================================================
+
+- name: Install hardening packages
+  ansible.builtin.apt:
+    name:
+      - fail2ban
+      - unattended-upgrades
+      # fail2ban's systemd backend reads the journal through this binding.
+      # Without it the backend fails to initialise and the sshd jail never
+      # starts — see the note in jail.local.j2.
+      - python3-systemd
+    state: present
+
+# -----------------------------------------------------------------------------
+# sshd
+# -----------------------------------------------------------------------------
+
+# `validate` is the line that matters. It runs `sshd -t` against the candidate
+# file BEFORE moving it into place. If the config would stop sshd from starting,
+# the task fails and the existing config is left untouched.
+#
+# Without it, a typo here writes a broken config, the handler restarts sshd,
+# sshd refuses to start, and the connection you would use to fix it is gone —
+# on a machine whose recovery path is detaching the boot volume and mounting it
+# somewhere else. This is the same reasoning as `visudo -cf` in the crew role:
+# where a config error is unrecoverable, validate before you install.
+- name: Install the sshd hardening drop-in
+  ansible.builtin.template:
+    src: 10-ensemble-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/10-ensemble-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "/usr/sbin/sshd -t -f %s"
+  notify: Restart sshd
+
+# Proof rather than assumption. `sshd -T` prints the fully resolved, effective
+# configuration — every default filled in and every drop-in merged in the order
+# sshd actually applies them. It's the only way to be sure the 10- prefix beat
+# cloud-init's 50-, rather than assuming the drop-in won because it exists.
+#
+# IDEMPOTENCY: a read. Registered for `soundcheck` to assert against later.
+- name: Read sshd's effective configuration
+  ansible.builtin.command: sshd -T
+  register: lockup_sshd_effective
+  changed_when: false
+
+- name: Fail if password authentication survived the drop-in
+  ansible.builtin.assert:
+    that:
+      - "'passwordauthentication no' in lockup_sshd_effective.stdout | lower"
+      - "'permitrootlogin no' in lockup_sshd_effective.stdout | lower"
+    fail_msg: >-
+      sshd's effective config still permits password authentication or root
+      login. Almost always this means another drop-in in
+      /etc/ssh/sshd_config.d/ sorts BEFORE 10-ensemble-hardening.conf and wins,
+      because sshd takes the first value it sees for a keyword rather than the
+      last. Check: ls /etc/ssh/sshd_config.d/
+    quiet: true
+
+# -----------------------------------------------------------------------------
+# Automatic security patching
+# -----------------------------------------------------------------------------
+
+- name: Configure the unattended-upgrades policy
+  ansible.builtin.template:
+    src: 52-ensemble-unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/52-ensemble-unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enable the periodic apt timers
+  ansible.builtin.template:
+    src: 20auto-upgrades.j2
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+
+# The config above is what the timers read; these are the timers. Both halves
+# have to be in place, which is why "I installed unattended-upgrades" and "the
+# machine is being patched" are different claims.
+- name: Ensure the apt timers are running
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+  when: lockup_unattended_upgrades | bool
+
+# -----------------------------------------------------------------------------
+# fail2ban
+# -----------------------------------------------------------------------------
+
+- name: Configure fail2ban
+  ansible.builtin.template:
+    src: jail.local.j2
+    dest: /etc/fail2ban/jail.local
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fail2ban
+  when: lockup_fail2ban | bool
+
+- name: Enable and start fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    enabled: true
+    state: started
+  when: lockup_fail2ban | bool
+
+- name: Stop and disable fail2ban when it has been turned off
+  ansible.builtin.service:
+    name: fail2ban
+    enabled: false
+    state: stopped
+  when: not (lockup_fail2ban | bool)

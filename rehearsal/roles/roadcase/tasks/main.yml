@@ -1,0 +1,118 @@
+---
+# =============================================================================
+# roadcase — the case the gear travels in
+# =============================================================================
+#
+# Docker.
+#
+# BE CLEAR ABOUT WHAT THIS IS NOT
+#
+# K3s does not use Docker. It embeds its own containerd, and the dockershim
+# that once let Kubernetes drive Docker was removed in Kubernetes 1.24. Nothing
+# installed here ever runs a pod. The two container runtimes coexist on the
+# node without conflicting — K3s runs its containerd as a child process on its
+# own socket, Docker runs the system one on /run/containerd/containerd.sock —
+# but they are genuinely separate, and an image you `docker pull` is not
+# visible to the cluster.
+#
+# WHAT IT IS FOR
+#
+# Being able to reach for `docker` when something is wrong. Pulling an image by
+# hand to see whether the registry credential works. Running a throwaway
+# container to test what the node's network can actually reach. Checking that
+# an image `score` built is really arm64 before spending an hour wondering why
+# a pod crash-loops with `exec format error`.
+#
+# That's roughly 150 MB of RAM for a debugging tool. It's set with a variable
+# (roadcase_install_docker) so it can be dropped if `metronome` makes memory
+# tight later — nothing in the platform depends on it.
+# =============================================================================
+
+- name: Create the apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: roadcase_install_docker | bool
+
+# Keys go in /etc/apt/keyrings and are referenced per-repository with
+# `signed-by=`, rather than into the global trusted keyring via the old
+# `apt-key add`. The difference is real: a key in the global keyring can sign
+# updates for ANY repository the machine trusts, so a compromised third-party
+# key becomes a path to replacing system packages. `signed-by` scopes the key
+# to the one repository it belongs to.
+#
+# IDEMPOTENCY: get_url skips the download when the destination already exists
+# with matching content, so this reports changed once.
+- name: Install Docker's apt signing key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: "0644"
+  when: roadcase_install_docker | bool
+
+- name: Add Docker's apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ roadcase_deb_arch }} signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu
+      {{ ansible_distribution_release }} stable
+    filename: docker
+    state: present
+    update_cache: true
+  when: roadcase_install_docker | bool
+
+- name: Install Docker
+  ansible.builtin.apt:
+    name: "{{ roadcase_packages }}"
+    state: present
+  when: roadcase_install_docker | bool
+
+# Docker's default json-file log driver has NO size limit. A container that
+# logs steadily will fill the boot volume, and the symptom is not "logs are
+# large" — it's the cluster failing in unrelated ways because the disk is full.
+# This is one of the most common causes of a lab box falling over after a few
+# weeks of looking fine.
+- name: Cap container log growth
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "{{ roadcase_log_max_size }}",
+          "max-file": "{{ roadcase_log_max_file }}"
+        }
+      }
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart docker
+  when: roadcase_install_docker | bool
+
+- name: Enable and start Docker
+  ansible.builtin.service:
+    name: docker
+    enabled: true
+    state: started
+  when: roadcase_install_docker | bool
+
+# Membership of the `docker` group is equivalent to root. Not "close to" root —
+# equivalent. The daemon runs as root and will happily bind-mount / into a
+# container for anyone who can talk to its socket.
+#
+# It's granted here because an operator account that has to `sudo docker` for
+# every command is an account people stop using, and passwordless sudo is
+# already configured for this user anyway — so this grants nothing that wasn't
+# already reachable. On a box where the operator did NOT have sudo, this would
+# be a privilege escalation and would need a different answer.
+- name: Let the operator account use Docker without sudo
+  ansible.builtin.user:
+    name: "{{ crew_user }}"
+    groups: docker
+    append: true
+  when: roadcase_install_docker | bool

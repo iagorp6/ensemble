@@ -1,0 +1,202 @@
+---
+# =============================================================================
+# doorman — who gets through the door, checked at the door itself
+# =============================================================================
+#
+# THE TRAP THIS ROLE EXISTS TO DEFUSE
+#
+# There are two firewalls between the internet and a process on this node, and
+# both have to allow a port for traffic to arrive:
+#
+#   1. The OCI security list from layer 1, enforced in Oracle's virtual network
+#      before packets ever reach the machine.
+#   2. iptables running inside the guest.
+#
+# Oracle's Ubuntu image ships with (2) already populated — a small ruleset that
+# accepts established connections, loopback and TCP 22, then ends each chain
+# with a blanket `REJECT --reject-with icmp-host-prohibited`. Those rules are
+# restored on every boot by the `iptables-persistent` package.
+#
+# So layer 1 opens 6443 in the security list, the OCI console shows the port
+# open, and kubectl still times out. Nothing in the console is wrong and nothing
+# in any log says why. This is the single most common way an OCI Kubernetes
+# build stalls on day one.
+#
+# WHY NOT JUST ADD RULES TO WHAT'S THERE
+#
+# Because the blanket REJECT sits at the END of the chain, anything new has to
+# be inserted before it by numeric index — and rule indices shift every time
+# anything else changes. That's a ruleset nobody can reason about six months
+# later. Replacing it with ufw gives a managed, ordered, declarative set that
+# both Ansible and a human can read.
+#
+# WHY UFW AND KUBERNETES NEED CARE TOGETHER
+#
+# K3s writes its own iptables rules for service routing and pod networking.
+# ufw and K3s coexist fine, but only if two things are true, and both are easy
+# to miss:
+#
+#   - The FORWARD policy must allow routed traffic. ufw defaults to dropping it,
+#     and every pod-to-pod and pod-to-service packet is forwarded. Get this
+#     wrong and the cluster comes up healthy while applications time out talking
+#     to each other — a failure that looks like DNS, or like the app, and is
+#     neither.
+#   - The pod and service CIDRs must be allowed as sources, because traffic from
+#     a pod arrives at the host from 10.42.x.x, which is not a network ufw has
+#     any reason to trust by default.
+# =============================================================================
+
+- name: Install ufw
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+
+# -----------------------------------------------------------------------------
+# Clear Oracle's preinstalled rules
+# -----------------------------------------------------------------------------
+
+# Purge first, so that even if the play is interrupted between here and the
+# rules being removed, a reboot doesn't quietly restore them and reintroduce
+# the problem invisibly.
+#
+# IDEMPOTENCY: apt state=absent is declarative — it reports changed on the run
+# that removes the packages and nothing on every run after.
+- name: Remove the packages that restore Oracle's iptables rules at boot
+  ansible.builtin.apt:
+    name:
+      - iptables-persistent
+      - netfilter-persistent
+    state: absent
+    purge: true
+
+# IDEMPOTENCY: `iptables -C` is a pure existence check — it exits 0 if the rule
+# is present and non-zero if it isn't, and changes nothing either way. Checking
+# before deleting is what makes the delete safe to repeat; `iptables -D` on a
+# rule that isn't there is an error, so a bare delete task would fail on the
+# second run.
+- name: Check whether Oracle's blanket REJECT rules are still present
+  ansible.builtin.command: >-
+    {{ item.bin }} -C {{ item.chain }} -j REJECT --reject-with {{ item.reject_with }}
+  register: doorman_reject_check
+  changed_when: false
+  failed_when: false
+  loop: "{{ doorman_oci_reject_rules }}"
+  loop_control:
+    label: "{{ item.bin }} {{ item.chain }}"
+
+- name: Remove Oracle's blanket REJECT rules
+  ansible.builtin.command: >-
+    {{ item.item.bin }} -D {{ item.item.chain }} -j REJECT --reject-with {{ item.item.reject_with }}
+  # `item.rc == 0` means the check above found the rule. Skipped entirely once
+  # they're gone, which is what makes the second run report zero changes.
+  when: item.rc == 0
+  changed_when: true
+  loop: "{{ doorman_reject_check.results }}"
+  loop_control:
+    label: "{{ item.item.bin }} {{ item.item.chain }}"
+
+# -----------------------------------------------------------------------------
+# ufw policy
+# -----------------------------------------------------------------------------
+
+- name: Default-deny anything arriving
+  community.general.ufw:
+    direction: incoming
+    default: deny
+
+- name: Allow anything leaving
+  community.general.ufw:
+    direction: outgoing
+    default: allow
+
+# This is the Kubernetes-critical one described in the header. `routed` is
+# ufw's name for the FORWARD chain policy, and setting it here is equivalent to
+# DEFAULT_FORWARD_POLICY="ACCEPT" in /etc/default/ufw — but done through the
+# module, so it's declarative and shows up properly in --check runs.
+- name: Allow routed traffic so pod and service networking works
+  community.general.ufw:
+    direction: routed
+    default: allow
+
+- name: Enable ufw logging
+  community.general.ufw:
+    logging: "{{ doorman_logging }}"
+
+# -----------------------------------------------------------------------------
+# Rules — all of them BEFORE the firewall is switched on
+# -----------------------------------------------------------------------------
+#
+# Ordering here is not stylistic. `ufw enable` activates a default-deny policy
+# immediately. Enabling first and adding the SSH rule afterwards drops the
+# connection Ansible is running over, mid-play, on a machine with no console.
+# The rules go in first, every time.
+
+- name: Allow SSH
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    from_ip: "{{ doorman_ssh_allowed_from }}"
+    comment: "SSH - how rehearsal reaches this node"
+
+- name: Allow the Kubernetes API
+  community.general.ufw:
+    rule: allow
+    port: "6443"
+    proto: tcp
+    from_ip: "{{ doorman_kube_api_allowed_from }}"
+    comment: "K3s API server - kubectl and ArgoCD"
+
+- name: Allow HTTP and HTTPS to the ingress controller
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+    comment: "Traefik ingress"
+  loop: ["80", "443"]
+  when: doorman_open_http | bool
+
+# Traffic originating in a pod reaches the host from the pod CIDR. Without
+# these two rules the cluster starts, reports every node and pod healthy, and
+# applications fail to reach each other — including CoreDNS, which makes the
+# whole thing look like a DNS problem.
+- name: Allow traffic from the pod network
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ doorman_pod_cidr }}"
+    comment: "K3s pod CIDR"
+
+- name: Allow traffic from the service network
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ doorman_service_cidr }}"
+    comment: "K3s service CIDR"
+
+# The CNI bridge and flannel's overlay interface. Allowing by interface rather
+# than by address covers traffic that hasn't been SNAT'd into the pod CIDR yet.
+- name: Allow everything arriving on the container network interfaces
+  community.general.ufw:
+    rule: allow
+    interface: "{{ item }}"
+    direction: in
+    comment: "K3s container networking"
+  loop:
+    - cni0
+    - flannel.1
+
+# Only strictly needed with a second node, but a firewall rule is a cheaper
+# thing to have in place than a debugging session on the day one is added.
+- name: Allow flannel VXLAN and the kubelet API from inside the VCN
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+    from_ip: "{{ vcn_cidr | default('10.0.0.0/16') }}"
+    comment: "{{ item.comment }}"
+  loop:
+    - { port: "{{ doorman_vxlan_port }}", proto: udp, comment: "flannel VXLAN" }
+    - { port: "{{ doorman_kubelet_port }}", proto: tcp, comment: "kubelet API" }
+
+- name: Enable ufw
+  community.general.ufw:
+    state: enabled

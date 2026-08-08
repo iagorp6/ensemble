@@ -1,0 +1,28 @@
+---
+# lockup — role defaults. Override in group_vars/ensemble.yml.
+
+lockup_ssh_allowed_users:
+  - ubuntu
+lockup_ssh_max_auth_tries: 3
+lockup_ssh_login_grace_time: 30
+
+# Drop an idle session after 10 minutes (300s x 2). Stops forgotten terminals
+# holding authenticated sessions open indefinitely.
+lockup_ssh_client_alive_interval: 300
+lockup_ssh_client_alive_count_max: 2
+
+# Kept ON deliberately. Port forwarding is how you reach the Kubernetes API
+# without exposing 6443 to the internet:
+#   ssh -L 6443:127.0.0.1:6443 stagehand@<node>
+# Turning it off would harden the box slightly and remove the better answer to
+# a bigger exposure.
+lockup_ssh_allow_tcp_forwarding: true
+
+lockup_unattended_upgrades: true
+lockup_unattended_reboot: false
+lockup_unattended_reboot_time: "03:00"
+
+lockup_fail2ban: true
+lockup_fail2ban_bantime: 1h
+lockup_fail2ban_findtime: 10m
+lockup_fail2ban_maxretry: 5

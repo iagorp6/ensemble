@@ -1,0 +1,50 @@
+# {{ ansible_managed }}
+# ensemble / rehearsal / lockup — sshd hardening
+#
+# WHY THIS FILE IS NUMBERED 10 AND NOT 99
+#
+# /etc/ssh/sshd_config starts with `Include /etc/ssh/sshd_config.d/*.conf`, and
+# sshd resolves conflicts by FIRST value wins — the opposite of most config
+# systems. Drop-ins are read in lexical order, so a lower number wins.
+#
+# That matters because Ubuntu's cloud images ship
+# /etc/ssh/sshd_config.d/50-cloud-init.conf, which on many images contains
+# `PasswordAuthentication yes`. Number this file 99 and cloud-init's setting is
+# read first and wins, so password authentication stays enabled while the
+# hardening file sits there looking correct.
+#
+# A drop-in rather than edits to sshd_config itself, because sshd_config is
+# package-managed: editing it invites conflicts on upgrade, while this file is
+# wholly owned by this role and can be removed cleanly.
+
+# Root has no reason to log in directly. Anything needing root goes through
+# sudo from a named account, which leaves an audit trail with a name on it.
+PermitRootLogin no
+
+# The important pair. Layer 1 exposes port 22 to the internet, which is
+# defensible only because there is no password to guess — key or nothing.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+PermitEmptyPasswords no
+
+# Fail fast on wrong keys. Every attempt an attacker gets is free work for
+# them and load for a 2-OCPU node.
+MaxAuthTries {{ lockup_ssh_max_auth_tries }}
+LoginGraceTime {{ lockup_ssh_login_grace_time }}
+
+# Close idle sessions rather than leaving authenticated terminals open forever.
+ClientAliveInterval {{ lockup_ssh_client_alive_interval }}
+ClientAliveCountMax {{ lockup_ssh_client_alive_count_max }}
+
+# No X11 on a headless server. One less forwarding path to reason about.
+X11Forwarding no
+
+# Kept on: this is how you reach the Kubernetes API through a tunnel instead of
+# exposing 6443 publicly.
+AllowTcpForwarding {{ 'yes' if lockup_ssh_allow_tcp_forwarding else 'no' }}
+
+# An explicit allow-list. Anything not named here cannot authenticate at all,
+# regardless of keys or group membership — including any service account a
+# package installs later with a shell by accident.
+AllowUsers {{ lockup_ssh_allowed_users | join(' ') }}

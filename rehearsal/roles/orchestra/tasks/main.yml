@@ -1,0 +1,193 @@
+---
+# =============================================================================
+# orchestra — the players, ready for a conductor
+# =============================================================================
+#
+# Installs K3s: a single binary that packages the Kubernetes control plane,
+# kubelet, containerd, CoreDNS, Traefik and a local-path storage provisioner
+# into roughly 60 MB of RAM at idle. Full upstream Kubernetes on a 2-OCPU node
+# would spend most of the machine on the control plane; K3s is what makes this
+# whole project fit inside the Always Free tier.
+#
+# It is a certified Kubernetes distribution, not a simplified one — the API is
+# the same API. What was removed is legacy cloud-provider code and alpha
+# features, and etcd is swapped for SQLite on a single node.
+#
+# After this role there is a cluster. Layer 4 (`conductor`) puts ArgoCD on it
+# and from that point nothing here touches deployments again.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Kernel prerequisites
+# -----------------------------------------------------------------------------
+
+# br_netfilter has to be loaded before net.bridge.* sysctls exist at all —
+# they're registered by the module, so setting them first fails with "cannot
+# stat /proc/sys/net/bridge/...", which reads like a permissions problem.
+#
+# `persistent: present` writes a modules-load.d entry as well as loading it now,
+# so the ordering is also correct after a reboot.
+- name: Load the bridge netfilter module
+  community.general.modprobe:
+    name: br_netfilter
+    state: present
+    persistent: present
+
+- name: Apply the kernel settings Kubernetes needs
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-ensemble-k3s.conf
+    sysctl_set: true
+    state: present
+    reload: true
+  loop: "{{ k3s_sysctls | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+
+# -----------------------------------------------------------------------------
+# Install
+# -----------------------------------------------------------------------------
+
+- name: Create a directory for the installer
+  ansible.builtin.file:
+    path: "{{ k3s_installer_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The documented way to install K3s is `curl -sfL https://get.k3s.io | sh -`.
+# Downloading it to disk first and running it as a separate step costs one task
+# and buys two things: the script that actually ran is still there to read
+# afterwards, and Ansible can report the download and the execution as separate
+# facts rather than one opaque shell invocation.
+- name: Download the K3s installer
+  ansible.builtin.get_url:
+    url: https://get.k3s.io
+    dest: "{{ k3s_installer_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+# IDEMPOTENCY: a read that is allowed to fail. On a fresh node /usr/local/bin/k3s
+# doesn't exist, so this returns non-zero and an empty stdout — which is
+# information, not an error. `failed_when: false` keeps it from stopping the
+# play, and the result drives the guard on the install task below.
+- name: Check which K3s version is already installed
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  register: orchestra_installed
+  changed_when: false
+  failed_when: false
+
+# `k3s --version` prints e.g. "k3s version v1.36.3+k3s1 (a1b2c3d)", so a
+# substring test against the pinned version answers both questions at once:
+# is it installed, and is it the right one? A version bump in group_vars makes
+# this run again and perform an in-place upgrade.
+- name: Compose the K3s server arguments
+  ansible.builtin.set_fact:
+    orchestra_exec_args: >-
+      server --node-name {{ inventory_hostname }}
+      {%- for san in k3s_tls_sans %} --tls-san {{ san }}{% endfor %}
+      {%- if k3s_secrets_encryption | bool %} --secrets-encryption{% endif %}
+      {%- for arg in k3s_extra_server_args %} {{ arg }}{% endfor %}
+
+- name: Show the arguments K3s will be installed with
+  ansible.builtin.debug:
+    var: orchestra_exec_args
+
+# IDEMPOTENCY: the `when:` guard is the whole mechanism. The installer script is
+# itself broadly re-runnable, but running it unconditionally restarts the K3s
+# service on every play — which means every run bounces the cluster, and the
+# "second run changes nothing" property is lost in the most disruptive way
+# available.
+- name: Install K3s
+  ansible.builtin.command: "{{ k3s_installer_path }}"
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    INSTALL_K3S_EXEC: "{{ orchestra_exec_args }}"
+  changed_when: true
+  when: k3s_version not in (orchestra_installed.stdout | default('', true))
+
+- name: Ensure K3s is enabled and running
+  ansible.builtin.service:
+    name: k3s
+    enabled: true
+    state: started
+
+# `kubectl wait` blocks until the condition is met or the timeout expires,
+# which is exactly the semantics wanted here — no retry/until loop to tune and
+# no polling interval to guess at. On a fresh install this takes a minute or so
+# while containerd pulls CoreDNS, Traefik and the rest.
+- name: Wait for the node to report Ready
+  ansible.builtin.command: >-
+    k3s kubectl wait --for=condition=Ready node/{{ inventory_hostname }} --timeout=300s
+  register: orchestra_node_ready
+  changed_when: false
+
+# -----------------------------------------------------------------------------
+# kubeconfig
+# -----------------------------------------------------------------------------
+
+# K3s writes /etc/rancher/k3s/k3s.yaml as root, mode 0600. The common advice is
+# to start K3s with --write-kubeconfig-mode 0644 so any user can read it; that
+# makes a cluster-admin credential world-readable on the node, which is a poor
+# trade for saving one task.
+- name: Create the operator's kube directory
+  ansible.builtin.file:
+    path: "/home/{{ crew_user }}/.kube"
+    state: directory
+    owner: "{{ crew_user }}"
+    group: "{{ crew_user }}"
+    mode: "0700"
+
+- name: Give the operator account its own kubeconfig
+  ansible.builtin.copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "/home/{{ crew_user }}/.kube/config"
+    remote_src: true
+    owner: "{{ crew_user }}"
+    group: "{{ crew_user }}"
+    mode: "0600"
+
+# Pulling the kubeconfig back to the control machine, with the server address
+# rewritten so it works from here.
+#
+# IDEMPOTENCY, and why this is a slurp-and-copy rather than the obvious `fetch`:
+# `fetch` compares the remote file against the local one. Rewriting the server
+# address afterwards makes them differ permanently, so `fetch` re-downloads and
+# the rewrite re-applies on every single run — two changed tasks, forever, and
+# the layer's central claim quietly stops being true.
+#
+# Reading the file and writing the transformed result with `copy: content:`
+# compares the FINAL content instead, so a second run is genuinely a no-op.
+- name: Read the cluster kubeconfig
+  ansible.builtin.slurp:
+    src: /etc/rancher/k3s/k3s.yaml
+  register: orchestra_kubeconfig
+  when: k3s_fetch_kubeconfig | bool
+
+- name: Write a kubeconfig pointed at the node's public address
+  ansible.builtin.copy:
+    content: >-
+      {{ orchestra_kubeconfig.content | b64decode
+         | replace('https://127.0.0.1:6443',
+                   'https://' ~ (node_public_ip | default(ansible_host)) ~ ':6443') }}
+    dest: "{{ k3s_kubeconfig_local_path }}"
+    mode: "0600"
+  delegate_to: localhost
+  # The control machine is a laptop, not the node. Escalating here would prompt
+  # for a local sudo password for no reason.
+  become: false
+  # This file embeds a client certificate with cluster-admin rights. no_log
+  # keeps it out of the terminal and out of any CI log, at the cost of a less
+  # informative diff if it fails.
+  no_log: true
+  when: k3s_fetch_kubeconfig | bool
+
+- name: Report where the kubeconfig landed
+  ansible.builtin.debug:
+    msg: >-
+      Cluster kubeconfig written to {{ k3s_kubeconfig_local_path }} (gitignored).
+      Use it with: KUBECONFIG={{ k3s_kubeconfig_local_path }} kubectl get nodes
+  when: k3s_fetch_kubeconfig | bool

@@ -1,0 +1,270 @@
+---
+# =============================================================================
+# soundcheck — prove it works before anyone's listening
+# =============================================================================
+#
+# Asserts that everything the roles above claimed to do actually happened.
+# Changes nothing: every task here is a read, and the role reports zero changes
+# even on the very first run.
+#
+# WHY A ROLE RATHER THAN TRUSTING THE OTHER ROLES
+#
+# Because "the task reported ok" and "the thing is true" are different claims,
+# and the gap between them is where most configuration bugs live. A template
+# task succeeding means a file was written. It does not mean sshd parsed it the
+# way you expected, that a drop-in with a lower number didn't override it, or
+# that the service reloaded. Each of those has bitten this layer specifically.
+#
+# It re-reads everything itself rather than reusing variables the other roles
+# registered, which means it can be run on its own against a node that was
+# configured weeks ago:
+#
+#   ansible-playbook playbook.yml --tags soundcheck
+#
+# That turns it from a build-time check into a drift detector.
+# =============================================================================
+
+- name: Gather current facts
+  ansible.builtin.setup:
+  changed_when: false
+
+# -----------------------------------------------------------------------------
+# Storage
+# -----------------------------------------------------------------------------
+
+- name: Read the root filesystem and its underlying disk
+  ansible.builtin.shell: |
+    set -o pipefail
+    dev=$(findmnt -no SOURCE /)
+    disk=$(lsblk -no PKNAME "$dev")
+    fs=$(df -B1 --output=size / | tail -1 | tr -d ' ')
+    raw=$(lsblk -bndo SIZE "/dev/$disk")
+    echo "$fs $raw"
+  args:
+    executable: /bin/bash
+  register: soundcheck_storage
+  changed_when: false
+
+- name: Root filesystem fills the boot volume
+  ansible.builtin.assert:
+    that:
+      - (soundcheck_storage.stdout.split()[0] | float) / (soundcheck_storage.stdout.split()[1] | float) > 0.9
+    fail_msg: >-
+      The root filesystem is only using
+      {{ ((soundcheck_storage.stdout.split()[0] | float) / (soundcheck_storage.stdout.split()[1] | float) * 100) | round(1) }}%
+      of the block device. There is unallocated space on the disk — growpart or
+      resize2fs did not complete. Left alone this fills up long before the disk
+      does, and the symptom will look like anything except a storage problem.
+    quiet: true
+
+- name: Swap is off
+  ansible.builtin.assert:
+    that:
+      - ansible_swaptotal_mb | int == 0
+    fail_msg: >-
+      Swap is still active ({{ ansible_swaptotal_mb }} MB). The kubelet sizes
+      eviction thresholds against real memory, so a node with swap degrades
+      instead of failing honestly.
+    quiet: true
+
+# -----------------------------------------------------------------------------
+# Firewall
+# -----------------------------------------------------------------------------
+
+- name: Read ufw status
+  ansible.builtin.command: ufw status verbose
+  register: soundcheck_ufw
+  changed_when: false
+
+- name: ufw is active with the policy Kubernetes needs
+  ansible.builtin.assert:
+    that:
+      - "'Status: active' in soundcheck_ufw.stdout"
+      - "'deny (incoming)' in soundcheck_ufw.stdout"
+      - "'allow (routed)' in soundcheck_ufw.stdout"
+    fail_msg: >-
+      ufw is not active, or the routed (FORWARD) policy is not 'allow'.
+      Without allow-routed, pod-to-pod and pod-to-service traffic is dropped —
+      the cluster will report every node and pod healthy while applications
+      time out talking to each other, which reads like a DNS or application
+      fault and is neither.
+    quiet: true
+
+# The specific trap this whole layer exists to defuse. Worth asserting directly
+# rather than inferring from "ufw is active", because the two coexist happily:
+# ufw can be perfectly configured while Oracle's blanket REJECT still sits at
+# the end of the chain quietly dropping everything.
+- name: Check Oracle's blanket REJECT rules are gone
+  ansible.builtin.command: "iptables -C {{ item }} -j REJECT --reject-with icmp-host-prohibited"
+  register: soundcheck_reject
+  changed_when: false
+  failed_when: false
+  loop: [INPUT, FORWARD]
+
+- name: Oracle's preinstalled REJECT rules have been removed
+  ansible.builtin.assert:
+    that:
+      - item.rc != 0
+    fail_msg: >-
+      Oracle's blanket REJECT rule is still present in the {{ item.item }}
+      chain. Ports opened in the OCI security list will still be unreachable,
+      and the console will show them as open.
+    quiet: true
+  loop: "{{ soundcheck_reject.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# -----------------------------------------------------------------------------
+# SSH
+# -----------------------------------------------------------------------------
+
+# `sshd -T` prints the effective config with every drop-in merged in the order
+# sshd actually applies them, which is the only way to be sure the hardening
+# file won rather than merely existing.
+- name: Read sshd's effective configuration
+  ansible.builtin.command: sshd -T
+  register: soundcheck_sshd
+  changed_when: false
+
+- name: sshd is hardened in its effective configuration
+  ansible.builtin.assert:
+    that:
+      - "'passwordauthentication no' in soundcheck_sshd.stdout | lower"
+      - "'permitrootlogin no' in soundcheck_sshd.stdout | lower"
+      - "'permitemptypasswords no' in soundcheck_sshd.stdout | lower"
+      - "'x11forwarding no' in soundcheck_sshd.stdout | lower"
+    fail_msg: >-
+      sshd's effective configuration is not hardened. Check the ordering of
+      files in /etc/ssh/sshd_config.d/ — sshd takes the FIRST value it sees for
+      a keyword, so a lower-numbered drop-in (cloud-init ships 50-) beats a
+      higher-numbered one.
+    quiet: true
+
+# -----------------------------------------------------------------------------
+# Patching and intrusion prevention
+# -----------------------------------------------------------------------------
+
+- name: Read the resolved unattended-upgrades configuration
+  ansible.builtin.command: apt-config dump APT::Periodic::Unattended-Upgrade
+  register: soundcheck_unattended
+  changed_when: false
+  failed_when: false
+
+- name: Automatic security upgrades are enabled
+  ansible.builtin.assert:
+    that:
+      - "'\"1\"' in soundcheck_unattended.stdout"
+    fail_msg: >-
+      APT::Periodic::Unattended-Upgrade is not "1", so the package is installed
+      but the timers will not act on it — which looks identical to working.
+    quiet: true
+  when: lockup_unattended_upgrades | default(true) | bool
+
+- name: Read fail2ban's jail status
+  ansible.builtin.command: fail2ban-client status sshd
+  register: soundcheck_fail2ban
+  changed_when: false
+  failed_when: false
+  when: lockup_fail2ban | default(true) | bool
+
+- name: The fail2ban sshd jail is running
+  ansible.builtin.assert:
+    that:
+      - soundcheck_fail2ban.rc == 0
+      - "'Filter' in soundcheck_fail2ban.stdout"
+    fail_msg: >-
+      The fail2ban sshd jail is not active. On Ubuntu without rsyslog this is
+      almost always the journald backend: fail2ban defaults to tailing
+      /var/log/auth.log, which does not exist, so it starts cleanly and bans
+      nothing forever. Check `backend = systemd` in /etc/fail2ban/jail.local
+      and that python3-systemd is installed.
+    quiet: true
+  when: lockup_fail2ban | default(true) | bool
+
+# -----------------------------------------------------------------------------
+# Container runtime and cluster
+# -----------------------------------------------------------------------------
+
+- name: Read the Docker version
+  ansible.builtin.command: docker version --format '{{ "{{" }}.Server.Version{{ "}}" }}'
+  register: soundcheck_docker
+  changed_when: false
+  failed_when: false
+  when: roadcase_install_docker | default(true) | bool
+
+- name: Docker is running
+  ansible.builtin.assert:
+    that:
+      - soundcheck_docker.rc == 0
+    fail_msg: "Docker is installed but the daemon is not responding."
+    quiet: true
+  when: roadcase_install_docker | default(true) | bool
+
+- name: Read the node's status from the cluster
+  ansible.builtin.command: k3s kubectl get nodes -o wide --no-headers
+  register: soundcheck_nodes
+  changed_when: false
+
+- name: Read the installed K3s version
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  register: soundcheck_k3s_version
+  changed_when: false
+
+- name: The cluster node is Ready and running the pinned version
+  ansible.builtin.assert:
+    that:
+      - "' Ready ' in soundcheck_nodes.stdout"
+      - k3s_version in soundcheck_k3s_version.stdout
+    fail_msg: >-
+      The node is not Ready, or is running a different K3s version than the one
+      pinned in group_vars ({{ k3s_version }}).
+      Reported: {{ soundcheck_nodes.stdout }}
+    quiet: true
+
+- name: Read system pod status
+  ansible.builtin.command: k3s kubectl get pods -n kube-system --no-headers
+  register: soundcheck_syspods
+  changed_when: false
+
+- name: No system pod is in a failed state
+  ansible.builtin.assert:
+    that:
+      - "'Error' not in soundcheck_syspods.stdout"
+      - "'CrashLoopBackOff' not in soundcheck_syspods.stdout"
+      - "'ImagePullBackOff' not in soundcheck_syspods.stdout"
+    fail_msg: >-
+      A kube-system pod is unhealthy. On this platform the first thing to rule
+      out is architecture: an amd64 image on an aarch64 node crash-loops with
+      'exec format error'.
+      {{ soundcheck_syspods.stdout }}
+    quiet: true
+
+# -----------------------------------------------------------------------------
+# Things worth knowing rather than failing on
+# -----------------------------------------------------------------------------
+
+# Reported rather than asserted, because automatic reboots are deliberately off
+# — a restart takes the whole single-node cluster down. This is what stops
+# "we don't auto-reboot" turning into "we never reboot".
+- name: Check whether a reboot is pending
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: soundcheck_reboot
+
+- name: Report the node's readiness
+  ansible.builtin.debug:
+    msg:
+      - "───────────── soundcheck ─────────────"
+      - "host           : {{ inventory_hostname }} ({{ ansible_host }})"
+      - "os             : {{ ansible_distribution }} {{ ansible_distribution_version }} / {{ ansible_architecture }}"
+      - "memory         : {{ ansible_memtotal_mb }} MB    cores: {{ ansible_processor_vcpus }}"
+      - "root fs        : {{ (soundcheck_storage.stdout.split()[0] | float / 1024 / 1024 / 1024) | round(1) }} GB of {{ (soundcheck_storage.stdout.split()[1] | float / 1024 / 1024 / 1024) | round(1) }} GB device"
+      - "swap           : {{ ansible_swaptotal_mb }} MB"
+      - "firewall       : ufw active, Oracle REJECT rules removed"
+      - "sshd           : keys only, no root login"
+      - "k3s            : {{ soundcheck_k3s_version.stdout_lines[0] | default('unknown') }}"
+      - "node           : {{ soundcheck_nodes.stdout_lines[0] | default('unknown') }}"
+      - "kube API       : https://{{ node_public_ip | default(ansible_host) }}:6443"
+      - "reboot pending : {{ 'YES — a kernel patch is waiting, schedule a restart' if soundcheck_reboot.stat.exists else 'no' }}"
+      - "──────────────────────────────────────"
+      - "Next: layer 4 (conductor) installs ArgoCD onto this cluster."

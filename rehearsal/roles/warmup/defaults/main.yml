@@ -1,0 +1,31 @@
+---
+# warmup — role defaults. Override in group_vars/ensemble.yml.
+
+warmup_timezone: UTC
+warmup_disable_swap: true
+
+# Whether to grow the root partition/filesystem if it doesn't fill the boot
+# volume. Set false if you ever partition the disk deliberately.
+warmup_grow_root: true
+
+# Grow only when the filesystem is using less than this fraction of the
+# underlying disk. Normal ext4 overhead puts a fully-grown filesystem at around
+# 0.97, and an ungrown one on a 100 GB volume sits near 0.45, so anything in
+# between is unambiguous.
+warmup_grow_threshold: 0.9
+
+# Present on every node before anything else runs.
+#   ca-certificates + gnupg : needed to add the Docker apt repo securely
+#   cloud-guest-utils       : provides growpart
+#   jq                      : reading kubectl -o json by hand while debugging
+#   python3-apt             : lets Ansible's apt modules work properly
+warmup_base_packages:
+  - ca-certificates
+  - cloud-guest-utils
+  - curl
+  - git
+  - gnupg
+  - htop
+  - jq
+  - python3-apt
+  - unzip

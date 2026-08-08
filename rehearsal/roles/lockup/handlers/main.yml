@@ -1,0 +1,18 @@
+---
+# Restarting sshd does NOT drop existing connections — the running session is
+# already forked off the listener. So this is safe to run over the very SSH
+# connection Ansible is using, which is not obvious and is worth knowing before
+# you hesitate over it on a box with no console.
+#
+# The real risk is a bad config, and that's handled upstream: the template task
+# runs `sshd -t` against the candidate file before installing it, so a config
+# that would stop sshd starting never reaches this handler.
+- name: Restart sshd
+  ansible.builtin.service:
+    name: ssh
+    state: restarted
+
+- name: Restart fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    state: restarted

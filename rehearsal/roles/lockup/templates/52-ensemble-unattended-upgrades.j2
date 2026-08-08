@@ -1,0 +1,51 @@
+// {{ ansible_managed }}
+// ensemble / rehearsal / lockup — unattended-upgrades policy
+//
+// WHY 52 AND NOT 49
+//
+// APT reads /etc/apt/apt.conf.d/* in lexical order and LAST assignment wins —
+// the opposite of sshd_config, which is worth holding in your head because the
+// two sit a few tasks apart in this role. Ubuntu ships 50unattended-upgrades,
+// so this file has to sort after it to override anything.
+//
+// A separate file rather than edits to 50unattended-upgrades, for the usual
+// reason: that one is package-managed and will be replaced on upgrade.
+
+// Security updates only. The full -updates pocket would keep the box more
+// current and would also mean feature updates landing unattended on the node
+// the whole platform runs on. Security patches are the part that can't wait
+// for a human; everything else can.
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+    "${distro_id}ESM:${distro_codename}-infra-security";
+};
+
+// Old kernels are large and the boot partition is small. Left unmanaged this
+// is a genuinely common way to make a server unbootable.
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+// THE REBOOT QUESTION.
+//
+// A kernel security patch installs but does not take effect until a reboot,
+// and a reboot takes the entire single-node cluster down with it — ArgoCD,
+// Prometheus, the app, all of it. With no second node there is nowhere for the
+// workload to go.
+//
+// So this is off, and `soundcheck` reports when a reboot is pending instead, so
+// it's a decision someone makes rather than something that quietly never
+// happens. That is also the honest production answer: patch automatically,
+// reboot on a schedule a human chose.
+Unattended-Upgrade::Automatic-Reboot "{{ 'true' if lockup_unattended_reboot else 'false' }}";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+Unattended-Upgrade::Automatic-Reboot-Time "{{ lockup_unattended_reboot_time }}";
+
+// No mail relay on this box, so mail would only fill the journal with
+// delivery failures.
+Unattended-Upgrade::Mail "";
+
+// Keep a record of what was installed unattended. When something breaks at 4am
+// the first question is always "did anything change?"
+Unattended-Upgrade::SyslogEnable "true";

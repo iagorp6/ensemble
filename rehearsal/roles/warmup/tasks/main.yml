@@ -1,0 +1,187 @@
+---
+# =============================================================================
+# warmup — get the instrument ready before anyone plays it
+# =============================================================================
+#
+# Base system preparation. Nothing here is interesting on its own, which is
+# rather the point: every later role assumes a current package cache, a
+# filesystem that is actually the size the boot volume says it is, and no swap.
+# This is where those assumptions become true.
+# =============================================================================
+
+- name: Set the system timezone
+  community.general.timezone:
+    name: "{{ warmup_timezone }}"
+  notify: Restart cron
+
+- name: Set the hostname to match the inventory
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+
+# `cache_valid_time` is what makes this idempotent in a useful sense. Without
+# it, every run re-downloads package lists — 30 seconds of nothing, every time.
+# With it, apt only refreshes if the cache is older than an hour, so a
+# re-run minutes later is instant.
+- name: Refresh the apt cache if it's stale
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name: "{{ warmup_base_packages }}"
+    state: present
+
+# -----------------------------------------------------------------------------
+# Root filesystem growth
+# -----------------------------------------------------------------------------
+#
+# Layer 1 asks OCI for a 100 GB boot volume. OCI provides a 100 GB *block
+# device* — growing the partition and the filesystem inside it is the guest's
+# job. Ubuntu's cloud image normally does this via cloud-init's growpart module
+# on first boot, and normally it works.
+#
+# "Normally" is why this is here. The failure mode when it doesn't is that
+# everything works fine for weeks and then the disk fills at 45 GB with 55 GB
+# of unallocated space sitting right there, and the cluster starts failing in
+# ways that have nothing obviously to do with storage. Verifying costs one
+# `lsblk`; assuming costs an evening.
+
+- name: Identify the root filesystem's mount entry
+  ansible.builtin.set_fact:
+    warmup_root_mount: "{{ ansible_mounts | selectattr('mount', 'equalto', '/') | list | first }}"
+  when: warmup_grow_root | bool
+
+# IDEMPOTENCY: pure reads. `changed_when: false` tells Ansible these never
+# modify anything, so they don't pollute the changed count that the whole
+# "second run reports zero changes" claim rests on.
+- name: Resolve the parent disk of the root partition
+  ansible.builtin.command: "lsblk -no PKNAME {{ warmup_root_mount.device }}"
+  register: warmup_pkname
+  changed_when: false
+  when: warmup_grow_root | bool
+
+- name: Measure the underlying block device
+  ansible.builtin.command: "lsblk -bndo SIZE /dev/{{ warmup_pkname.stdout | trim }}"
+  register: warmup_disk_bytes
+  changed_when: false
+  when: warmup_grow_root | bool
+
+- name: Work out whether the filesystem actually fills the disk
+  ansible.builtin.set_fact:
+    # Trailing digits of e.g. /dev/sda1 -> "1". Works for nvme0n1p1 too, where
+    # PKNAME correctly returns nvme0n1 and the trailing 1 is the partition.
+    warmup_root_partnum: "{{ warmup_root_mount.device | regex_search('([0-9]+)$') }}"
+    warmup_fs_fill_ratio: "{{ (warmup_root_mount.size_total | float) / (warmup_disk_bytes.stdout | trim | float) }}"
+  when: warmup_grow_root | bool
+
+# OCI's Ubuntu images put root directly on a partition (/dev/sda1), which is
+# what the tasks below assume. An LVM or ZFS root would come back with no
+# trailing partition number and growing it needs a different set of commands
+# entirely — so refuse to guess rather than handing growpart an empty argument.
+- name: Skip growth if the root device isn't a plain partition
+  ansible.builtin.set_fact:
+    warmup_grow_root: false
+  when:
+    - warmup_grow_root | bool
+    - not warmup_root_partnum
+
+- name: Warn when the root layout isn't one this role can grow
+  ansible.builtin.debug:
+    msg: >-
+      Root device {{ warmup_root_mount.device }} has no trailing partition
+      number, so it is probably LVM or ZFS rather than a plain partition.
+      Skipping filesystem growth — check `df -h /` by hand and grow it with the
+      right tool for that layout.
+  # Deliberately narrow: only fires when detection ran and came back empty, not
+  # when someone simply turned warmup_grow_root off in group_vars.
+  when:
+    - warmup_root_partnum is defined
+    - not warmup_root_partnum
+
+- name: Report the filesystem-to-disk ratio
+  ansible.builtin.debug:
+    msg: >-
+      Root filesystem is {{ (warmup_root_mount.size_total / 1024 / 1024 / 1024) | round(1) }} GB
+      on a {{ (warmup_disk_bytes.stdout | trim | int / 1024 / 1024 / 1024) | round(1) }} GB device
+      ({{ (warmup_fs_fill_ratio | float * 100) | round(1) }}% used of available space).
+      {{ 'Growing it.' if (warmup_fs_fill_ratio | float) < (warmup_grow_threshold | float) else 'Nothing to do.' }}
+  when: warmup_grow_root | bool
+
+# IDEMPOTENCY: two independent guards, because partition surgery deserves them.
+#
+#   1. The `when:` skips this entirely once the filesystem fills the disk, so
+#      the normal case never touches the partition table at all.
+#   2. If it does run, growpart is itself idempotent — it prints NOCHANGE and
+#      exits non-zero when the partition is already at maximum size. Treating
+#      that specific non-zero exit as success is what stops a re-run failing.
+#
+# This pattern — a `when:` for efficiency plus `failed_when`/`changed_when` for
+# correctness — is the general shape of making a `command` task safe.
+- name: Grow the root partition to fill the boot volume
+  ansible.builtin.command: "growpart /dev/{{ warmup_pkname.stdout | trim }} {{ warmup_root_partnum }}"
+  register: warmup_growpart
+  changed_when: "'CHANGED' in warmup_growpart.stdout"
+  failed_when:
+    - warmup_growpart.rc != 0
+    - "'NOCHANGE' not in (warmup_growpart.stdout + warmup_growpart.stderr)"
+  when:
+    - warmup_grow_root | bool
+    - (warmup_fs_fill_ratio | float) < (warmup_grow_threshold | float)
+
+# IDEMPOTENCY: resize2fs prints "Nothing to do!" and exits 0 when the
+# filesystem already spans the partition, so this is safe to repeat. Only the
+# absence of that string counts as a change.
+- name: Grow the root filesystem onto the resized partition
+  ansible.builtin.command: "resize2fs {{ warmup_root_mount.device }}"
+  register: warmup_resize
+  changed_when: "'Nothing to do' not in (warmup_resize.stdout + warmup_resize.stderr)"
+  when:
+    - warmup_grow_root | bool
+    - (warmup_fs_fill_ratio | float) < (warmup_grow_threshold | float)
+
+# -----------------------------------------------------------------------------
+# Swap
+# -----------------------------------------------------------------------------
+#
+# The kubelet sizes its eviction thresholds against real memory. With swap
+# available, a node under memory pressure doesn't hit those thresholds — it
+# swaps, and everything on it gets slow enough to fail health checks while
+# reporting itself healthy. A node that fails honestly is easier to operate
+# than one that degrades quietly.
+#
+# Kubernetes 1.28+ can be configured to tolerate swap, and there are real cases
+# for it. A single node running its own monitoring is not one of them.
+
+# IDEMPOTENCY: `swapoff -a` succeeds whether or not swap is on, and the guard
+# means it only runs when facts show swap actually active — so it reports
+# changed exactly once.
+- name: Disable swap for the running system
+  ansible.builtin.command: swapoff -a
+  changed_when: true
+  when:
+    - warmup_disable_swap | bool
+    - ansible_swaptotal_mb | int > 0
+
+# The fstab entry is what brings swap back after a reboot, so `swapoff` without
+# this is a fix that lasts until the next restart.
+#
+# IDEMPOTENCY: the negative lookahead `(?!#)` makes this self-limiting — once a
+# swap line has been commented out it no longer matches, so a second run finds
+# nothing to change. Commenting rather than deleting also leaves the original
+# line readable for whoever wonders later why there's no swap.
+- name: Comment out swap entries in /etc/fstab so it stays off across reboots
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^(?!#)(.*\s+swap\s+.*)$'
+    replace: '# \1'
+  when: warmup_disable_swap | bool
+
+# Ubuntu cloud images sometimes provision swap as a file via cloud-init rather
+# than a partition, in which case there's no fstab entry to remove and the file
+# is what has to go.
+- name: Remove a cloud-init swapfile if one exists
+  ansible.builtin.file:
+    path: /swap.img
+    state: absent
+  when: warmup_disable_swap | bool

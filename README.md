@@ -13,7 +13,7 @@ Each of those is a layer, and the mapping is exact:
 | # | Layer | Tool | What it does |
 |---|-------|------|--------------|
 | 1 | [**tuning**](tuning/) | Terraform | Provisions the compute — an Oracle Cloud Always Free ARM VM |
-| 2 | **rehearsal** | Ansible | Hardens and configures that VM into a ready state |
+| 2 | [**rehearsal**](rehearsal/) | Ansible | Hardens and configures that VM into a ready state |
 | 3 | **score** | GitHub Actions | CI — builds, tests, and pushes a container image |
 | 4 | **conductor** | ArgoCD | GitOps — watches the manifests and syncs the cluster, unattended |
 | 5 | **backstage** | SOPS + age | Encrypted secrets, safe to commit to Git |
@@ -26,7 +26,7 @@ Built one layer at a time, and demoable at every stage rather than only at the
 end.
 
 - [x] **1 · tuning** — VCN, gateway, routing, security list, subnet, A1 instance. Free-tier limits enforced in code.
-- [ ] **2 · rehearsal**
+- [x] **2 · rehearsal** — seven idempotent roles: base prep, operator account, firewall, hardening, Docker, K3s, verification.
 - [ ] **3 · score**
 - [ ] **4 · conductor**
 - [ ] **5 · backstage**
@@ -134,11 +134,15 @@ them at chart defaults on a machine that never fills up.
 Each layer stands alone and has its own README with prerequisites, concepts and
 runbook. Start at the beginning:
 
-**→ [tuning](tuning/README.md)** — Terraform, OCI credentials, and the VM.
+**1 → [tuning](tuning/README.md)** — Terraform, OCI credentials, and the VM.
+**2 → [rehearsal](rehearsal/README.md)** — Ansible, hardening, and the K3s cluster.
 
 You'll need a free [Oracle Cloud](https://www.oracle.com/cloud/free/) account.
 Everything in this repo is designed to stay inside the Always Free tier, and
 layer 1 enforces that in code rather than trusting me to remember.
+
+Both layers run from WSL — Ansible has no supported Windows control node, so
+there's one toolchain rather than two.
 
 ---
 

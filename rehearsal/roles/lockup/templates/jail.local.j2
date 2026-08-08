@@ -1,0 +1,39 @@
+# {{ ansible_managed }}
+# ensemble / rehearsal / lockup — fail2ban
+#
+# jail.local rather than edits to jail.conf: fail2ban reads .conf first and then
+# .local on top, and .conf is package-managed. Everything local goes here.
+
+[DEFAULT]
+
+# THE LINE THAT MAKES THIS WORK ON MODERN UBUNTU.
+#
+# fail2ban's historical default is to tail /var/log/auth.log. Ubuntu server no
+# longer installs rsyslog, so that file does not exist and never appears —
+# authentication events go to the systemd journal instead.
+#
+# Leave this unset and fail2ban installs cleanly, starts cleanly, reports itself
+# active, and bans absolutely nothing, forever. There is no error to find
+# because from fail2ban's point of view a log file that never grows is just a
+# quiet server.
+backend = systemd
+
+bantime  = {{ lockup_fail2ban_bantime }}
+findtime = {{ lockup_fail2ban_findtime }}
+maxretry = {{ lockup_fail2ban_maxretry }}
+
+# Never ban ourselves out of the box. Loopback, IPv6 loopback, and the whole
+# VCN — because traffic from inside the cluster network hitting a rate limit
+# and getting the host banned would be a genuinely confusing outage.
+ignoreip = 127.0.0.1/8 ::1 {{ vcn_cidr | default('10.0.0.0/16') }} {{ doorman_pod_cidr }} {{ doorman_service_cidr }}
+
+# Ban through ufw rather than by writing raw iptables rules. `doorman` already
+# put ufw in charge of this host's packet filtering; having fail2ban insert
+# rules underneath it would mean two things managing one ruleset, and a ban
+# that survives a `ufw reload` only by accident.
+banaction          = ufw
+banaction_allports = ufw
+
+[sshd]
+enabled = true
+port    = 22

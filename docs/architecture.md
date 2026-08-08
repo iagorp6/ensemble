@@ -6,7 +6,7 @@ decisions get argued rather than stated.
 Written incrementally — each layer gets its section as it's built, so this file
 tracks the real state of the repo rather than an aspirational one.
 
-**Built so far:** layer 1 (`tuning`).
+**Built so far:** layers 1 (`tuning`) and 2 (`rehearsal`).
 
 ---
 
@@ -245,16 +245,123 @@ it's the first thing layer 2 has to get right.
 
 ---
 
-## Layers 2–7
+## Layer 2 — `rehearsal`
+
+Full documentation: [rehearsal/README.md](../rehearsal/README.md).
+
+### What it configures
+
+Seven roles, in an order that isn't arbitrary:
+
+```mermaid
+flowchart LR
+    tuning["layer 1 output<br/>IP + SSH login"] --> warmup
+
+    warmup["<b>warmup</b><br/>packages, timezone<br/>grow root fs, swap off"]
+    crew["<b>crew</b><br/>non-root operator<br/>account + sudo"]
+    doorman["<b>doorman</b><br/>remove Oracle iptables<br/>ufw + K3s CIDRs"]
+    lockup["<b>lockup</b><br/>sshd drop-in, fail2ban<br/>unattended-upgrades"]
+    roadcase["<b>roadcase</b><br/>Docker<br/>(debugging only)"]
+    orchestra["<b>orchestra</b><br/>K3s + sysctls<br/>+ kubeconfig"]
+    soundcheck["<b>soundcheck</b><br/>assert all of it<br/>changes nothing"]
+
+    warmup --> crew --> doorman --> lockup --> roadcase --> orchestra --> soundcheck
+    soundcheck --> out["layer 4 input<br/>running cluster + kubeconfig"]
+```
+
+`crew` runs before `lockup` so the account exists before sshd starts refusing
+logins. `doorman` runs before `lockup` so ufw exists for fail2ban to ban into.
+
+### Decisions worth defending
+
+**Idempotency is designed for, not inherited.** Ansible's declarative modules
+get most of it free, but the 22 `command`/`shell` tasks here are escape hatches
+back into imperative scripting and each carries an explicit guard — a
+`changed_when: false` for pure reads, a check-then-act pair for the iptables
+removal, or parsing the tool's own "nothing to do" output for `growpart`. The
+subtlest case is the kubeconfig: `fetch` would compare the remote file against
+a local one that has been deliberately rewritten, so it re-downloads forever.
+Reading it and writing the transformed result with `copy: content:` compares the
+final state instead.
+
+**Two firewalls, and the console lies about it.** Oracle's Ubuntu image ships
+iptables rules ending in a blanket REJECT, restored at every boot by
+`iptables-persistent`. Layer 1 can open 6443 in the security list, the console
+will show it open, and the port stays unreachable. `doorman` removes those rules
+rather than inserting before them, because the REJECT sits at the end of the
+chain and anything added has to go in by numeric index — indices that shift
+whenever anything else changes.
+
+**ufw needs two Kubernetes-specific settings, and getting them wrong is
+invisible.** Forwarded traffic must be allowed (every pod-to-pod packet is
+forwarded; ufw drops those by default) and the pod/service CIDRs must be trusted
+as sources. Without them the cluster reports every node and pod healthy while
+applications time out reaching each other — including CoreDNS, which makes it
+present as a DNS fault.
+
+**Drop-in ordering runs in opposite directions.** sshd takes the *first* value
+for a keyword, so the hardening file is `10-` — numbering it `99-` would let
+cloud-init's `50-cloud-init.conf` (which sets `PasswordAuthentication yes`) win
+while the hardening file sits there looking correct. APT takes the *last*, so
+the unattended-upgrades override is `52-`. Both are asserted against effective
+config rather than assumed: `lockup` runs `sshd -T` and fails if password auth
+survived.
+
+**Validate anything that can lock you out.** `sudoers` and `sshd_config` are the
+two files where a syntax error is unrecoverable on a VM with no serial console —
+sudo refuses to run at all, sshd refuses to start. Both tasks use Ansible's
+`validate:` to run `visudo -cf` / `sshd -t` against the candidate file before it
+is moved into place.
+
+**Docker is installed and the cluster doesn't use it.** K3s embeds its own
+containerd; dockershim was removed in Kubernetes 1.24. It's an operator tool for
+pulling an image by hand or confirming a `score` build is genuinely arm64, and
+it's behind a variable so it can be dropped when `metronome` makes memory tight.
+
+**The K3s version is pinned and `--tls-san` carries the public IP.** Piping
+`get.k3s.io` into a shell installs whatever is newest that day. And without the
+public IP in the API certificate's SANs, kubectl from a laptop fails
+verification against an address the certificate doesn't cover — which looks like
+a kubeconfig problem and isn't. The IP comes from the inventory Terraform
+generated, which is where layer 1's outputs stop being decorative.
+
+**Swap off, inotify limits raised.** The kubelet sizes eviction thresholds
+against real memory, so swap makes a node degrade instead of failing honestly.
+The inotify limits are pre-emptive: every container watching files draws from a
+small system-wide pool, and `metronome` is about to add Prometheus, Grafana,
+Loki and their sidecars. Exhausting it presents as pods crash-looping with "too
+many open files", which sends you to ulimits, where the answer isn't.
+
+### Verification is a role, not a claim
+
+`soundcheck` asserts every property the other roles claim, re-reading everything
+itself rather than trusting registered variables — so it runs standalone against
+a node configured weeks ago and works as a drift detector:
+
+```bash
+ansible-playbook playbook.yml --tags soundcheck
+```
+
+It exists because "the task reported ok" and "the thing is true" are different
+claims, and the gap is where configuration bugs live. A template task succeeding
+means a file was written — not that sshd parsed it as intended, that a
+lower-numbered drop-in didn't override it, or that traffic actually gets through
+the firewall. Each of those has a specific trap in this layer.
+
+---
+
+## Layers 3–7
 
 Not built yet. Each gets a section here as it lands, with the same
 decisions-worth-defending treatment.
 
-Known constraints already carried forward from layer 1:
+Known constraints carried forward:
 
-- **`rehearsal`** must reconcile the in-guest iptables rules, not just install a
-  firewall on top of them. It also needs to verify the root filesystem actually
-  grew to the 100 GB boot volume rather than assume it.
-- **`score`** must build `linux/arm64`.
-- **`metronome`** has 12 GB total to share with everything else, so retention
-  and scrape intervals are configuration decisions, not defaults.
+- **`score`** must build `linux/arm64`. An amd64 image pulls onto this node and
+  dies with `exec format error`.
+- **`conductor`** gets a cluster whose kubeconfig currently sits on a laptop.
+  Installing ArgoCD is the last thing that uses it that way — after layer 4,
+  changes arrive by Git.
+- **`metronome`** has 12 GB to share with everything else, so retention and
+  scrape intervals are configuration decisions, not defaults. The inotify limits
+  are already raised for it.

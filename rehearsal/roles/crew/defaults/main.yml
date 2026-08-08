@@ -1,0 +1,12 @@
+---
+# crew — role defaults. Override in group_vars/ensemble.yml.
+
+crew_user: stagehand
+crew_comment: "ensemble operator account"
+crew_shell: /bin/bash
+crew_passwordless_sudo: true
+
+# Leave unset to reuse whatever key cloud-init installed for the connecting
+# user — which is, by construction, the key layer 1 put on the box. Set it to
+# explicit key material to authorize a different one.
+crew_authorized_key: ""

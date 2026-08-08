@@ -1,0 +1,20 @@
+---
+# roadcase — role defaults. Override in group_vars/ensemble.yml.
+
+roadcase_install_docker: true
+
+roadcase_log_max_size: "10m"
+roadcase_log_max_file: "3"
+
+roadcase_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# Docker's apt repo names architectures the way dpkg does, not the way `uname`
+# does: aarch64 is published as arm64. Getting this wrong produces
+# "N: Skipping acquire of configured file ... doesn't have the component" and
+# then a 404, which reads like the repo is broken rather than like a typo.
+roadcase_deb_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"

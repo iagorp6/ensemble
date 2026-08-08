@@ -1,0 +1,165 @@
+# =============================================================================
+# rehearsal / group_vars/ensemble.yml — the knobs for the whole layer
+# =============================================================================
+#
+# Ansible loads this automatically for every host in the `ensemble` group. Each
+# role also ships its own defaults/main.yml; anything set here wins, because
+# group_vars sit above role defaults in Ansible's variable precedence.
+#
+# The split is deliberate: role defaults are "a sensible value for this role in
+# isolation", and this file is "what THIS platform decided". Keeping the
+# decisions in one readable place beats hunting through seven roles.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Base system
+# -----------------------------------------------------------------------------
+
+# UTC on servers, always. Log correlation across a cluster, a CI runner and a
+# laptop is miserable enough without three timezones in the timestamps.
+warmup_timezone: UTC
+
+# Kubernetes' memory accounting assumes swap doesn't exist — the kubelet sizes
+# eviction thresholds against real RAM, and swap lets a node get catastrophically
+# slow instead of honestly failing a pod. Kubernetes 1.28+ can tolerate swap,
+# but "off" remains the boring, predictable answer for a single node.
+warmup_disable_swap: true
+
+# -----------------------------------------------------------------------------
+# The operator account
+# -----------------------------------------------------------------------------
+
+# A non-root account that owns day-to-day work on the node.
+#
+# Worth being honest about what this is FOR. With GitOps in place nothing
+# deploys over SSH — `conductor` pulls from Git and nothing outside the cluster
+# holds a credential that can change it. So this is not a "deploy user" in the
+# push-based sense. It's a least-privilege account for the times a human has to
+# go and look at something, which keeps `root` for things that genuinely need
+# root and gives the audit trail a name.
+crew_user: stagehand
+crew_comment: "ensemble operator account"
+crew_shell: /bin/bash
+
+# Passwordless sudo. This is convenience, and it is worth naming the cost:
+# an account with NOPASSWD sudo is root with extra steps. It's here because the
+# alternative — a sudo password in a vault, prompted on every play — buys very
+# little on a single-operator box and adds a secret to manage.
+crew_passwordless_sudo: true
+
+# -----------------------------------------------------------------------------
+# Firewall
+# -----------------------------------------------------------------------------
+
+# Who may reach SSH and the Kubernetes API at the HOST firewall, independently
+# of what layer 1's OCI security list allows. Both have to permit a port for
+# traffic to arrive.
+#
+# Defaulting to "anywhere" matches layer 1, and the reasoning is the same:
+# home connections have dynamic addresses, and locking yourself out of a box
+# with no serial console is a worse outcome than a well-hardened sshd being
+# reachable. `lockup` is what makes that defensible.
+doorman_ssh_allowed_from: any
+doorman_kube_api_allowed_from: any
+
+# K3s defaults. These have to be allowed through ufw or pod-to-pod and
+# pod-to-service traffic dies in ways that look like random application
+# timeouts rather than a firewall problem.
+doorman_pod_cidr: 10.42.0.0/16
+doorman_service_cidr: 10.43.0.0/16
+
+# 80/443 for Traefik, which K3s installs by default. Matches open_http_ports in
+# layer 1 — set both to false together or the result is confusing.
+doorman_open_http: true
+
+# -----------------------------------------------------------------------------
+# Hardening
+# -----------------------------------------------------------------------------
+
+# Accounts permitted to log in over SSH at all. `ubuntu` stays because it's the
+# account Ansible itself connects as; drop it only after switching
+# ansible_user to the crew account, and test in another terminal first.
+lockup_ssh_allowed_users:
+  - ubuntu
+  - "{{ crew_user }}"
+
+lockup_ssh_max_auth_tries: 3
+
+# Automatic security patching. The reboot question is the interesting one:
+# unattended-upgrades can install a new kernel but only a reboot activates it,
+# and a reboot takes the whole single-node cluster down.
+#
+# Left off, because an unscheduled 3am restart of the only node is worse than a
+# pending kernel patch on a lab box, and because "we patch automatically and
+# reboot on a schedule a human chose" is the honest production answer too.
+# `soundcheck` reports when a reboot is pending so it doesn't go unnoticed.
+lockup_unattended_upgrades: true
+lockup_unattended_reboot: false
+
+lockup_fail2ban: true
+lockup_fail2ban_bantime: 1h
+lockup_fail2ban_findtime: 10m
+lockup_fail2ban_maxretry: 5
+
+# -----------------------------------------------------------------------------
+# Docker
+# -----------------------------------------------------------------------------
+
+# NOTE, because this is the one place the layer does something arguably
+# redundant: K3s does NOT use Docker. It embeds its own containerd, and the
+# dockershim that once let Kubernetes drive Docker was removed in 1.24. So
+# Docker here is not the cluster's container runtime and never runs a pod.
+#
+# It earns its ~150 MB as an operator tool — pulling and inspecting an image by
+# hand, running a throwaway container to test connectivity from inside the
+# node's network, checking that an arm64 image actually is arm64 before
+# wondering why a pod crash-loops. That's genuinely useful when debugging layer
+# 3's build output.
+#
+# Set false if memory gets tight once `metronome` lands. Nothing depends on it.
+roadcase_install_docker: true
+
+# Container logs with no limit will eventually fill the boot volume, and the
+# first symptom is the cluster failing in unrelated ways. json-file is the
+# default driver; these are the caps it ships without.
+roadcase_log_max_size: "10m"
+roadcase_log_max_file: "3"
+
+# -----------------------------------------------------------------------------
+# K3s
+# -----------------------------------------------------------------------------
+
+# Pinned, not `latest`. `curl -sfL https://get.k3s.io | sh -` installs whatever
+# is newest at the moment you run it, which means two nodes built a month apart
+# are running different Kubernetes and the repo can't tell you which. This is
+# the current `stable` channel release as of the build.
+#
+# Check for newer: https://update.k3s.io/v1-release/channels
+k3s_version: "v1.36.3+k3s1"
+
+# Extra names and addresses to put in the API server's TLS certificate.
+#
+# This is the flag people miss. Without the public IP as a Subject Alternative
+# Name, the certificate K3s generates is valid for 127.0.0.1 and the private IP
+# only — so kubectl from a laptop connects, gets a certificate that doesn't
+# match the address it dialled, and fails verification. The fix looks like a
+# kubeconfig problem and isn't.
+#
+# node_public_ip comes from the inventory tuning generated. This is the clearest
+# example in the repo of layer 1's outputs being load-bearing rather than
+# decorative.
+k3s_tls_sans:
+  - "{{ node_public_ip | default(ansible_host) }}"
+
+# Encrypt Secret objects at rest rather than storing them base64-encoded (which
+# is encoding, not encryption) in K3s's datastore. Pairs with `backstage`
+# (layer 5): SOPS protects secrets in Git, this protects them once applied.
+k3s_secrets_encryption: true
+
+# Pull the kubeconfig back to the control machine, with the server address
+# rewritten from 127.0.0.1 to the node's public IP so it works from here.
+#
+# The result is a CREDENTIAL — it embeds a client certificate with cluster-admin
+# rights. It is gitignored, and layer 4 is where it gets used.
+k3s_fetch_kubeconfig: true
+k3s_kubeconfig_local_path: "./kubeconfig.podium"

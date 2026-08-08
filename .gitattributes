@@ -1,0 +1,12 @@
+# Everything this repo produces runs on Linux — the OCI node, the containers
+# `score` builds, the manifests `conductor` syncs. Force LF line endings so a
+# CRLF can never reach a shell script, an Ansible playbook, a systemd unit or a
+# container entrypoint and break it with "bad interpreter: /usr/bin/env bash^M".
+#
+# This matters here specifically because the control machine is Windows with
+# core.autocrlf=true. Without this file, git would helpfully convert every
+# checked-out script to CRLF and the failure would only show up on the remote
+# host, which is the worst place to debug it.
+#
+# Applies regardless of what core.autocrlf the person cloning has set.
+* text=auto eol=lf

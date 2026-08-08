@@ -1,0 +1,108 @@
+---
+# =============================================================================
+# crew — the people who actually work the stage
+# =============================================================================
+#
+# Creates a non-root operator account.
+#
+# Worth being precise about why, because "create a deploy user" is one of those
+# steps that gets copied between playbooks without anyone asking what it's for.
+#
+# It is NOT a deploy user in the push sense. Once `conductor` (layer 4) is
+# running, deployment happens by merging to Git and ArgoCD pulling — nothing
+# outside the cluster holds a credential that can change it, and nothing SSHes
+# in to release anything. That's the whole design.
+#
+# What this account is for is the other half: the times a human has to go and
+# look. Running as a named non-root account rather than as `ubuntu` or `root`
+# means sudo produces an audit trail with a name on it, and means the blast
+# radius of a mistake starts small and has to be deliberately escalated.
+#
+# It runs BEFORE `lockup` on purpose. Hardening sshd while the only account
+# that can use the hardened config doesn't exist yet is how people lock
+# themselves out of cloud VMs.
+# =============================================================================
+
+- name: Create the operator group
+  ansible.builtin.group:
+    name: "{{ crew_user }}"
+    state: present
+
+- name: Create the operator account
+  ansible.builtin.user:
+    name: "{{ crew_user }}"
+    group: "{{ crew_user }}"
+    comment: "{{ crew_comment }}"
+    shell: "{{ crew_shell }}"
+    create_home: true
+    # No password is set, and that's intentional rather than an omission. The
+    # account is key-only; with no password hash there is nothing to brute
+    # force, and `lockup` turns password authentication off entirely anyway.
+    password: "!"
+    state: present
+
+# Rather than requiring the public key to be readable on the control machine —
+# which would mean this layer depends on a local file path and breaks when
+# somebody runs it from a different laptop — read the key that is already on
+# the node. cloud-init put it there from layer 1's Terraform metadata, so it is
+# guaranteed to be the right one.
+#
+# IDEMPOTENCY: slurp is a read. changed_when isn't needed because slurp never
+# reports changed.
+- name: Read the key cloud-init installed for the connecting user
+  ansible.builtin.slurp:
+    src: "/home/{{ ansible_user }}/.ssh/authorized_keys"
+  register: crew_bootstrap_keys
+  when: not crew_authorized_key
+
+- name: Authorize that key for the operator account
+  ansible.posix.authorized_key:
+    user: "{{ crew_user }}"
+    key: "{{ crew_authorized_key if crew_authorized_key else (crew_bootstrap_keys.content | b64decode) }}"
+    state: present
+    # `exclusive` makes this declarative rather than additive: the file ends up
+    # containing exactly these keys and nothing else. A key added by hand at
+    # some point gets removed on the next run — which is the correct behaviour
+    # for a repo that claims Git is the source of truth, and is exactly the
+    # behaviour you want the day you need to be certain who can log in.
+    exclusive: true
+
+# -----------------------------------------------------------------------------
+# sudo
+# -----------------------------------------------------------------------------
+#
+# A drop-in under /etc/sudoers.d rather than an edit to /etc/sudoers: the main
+# file is package-managed and editing it invites conflicts on upgrade, while a
+# drop-in is wholly owned by this role and can be removed cleanly.
+#
+# `validate` is the important line. sudo refuses to run at all if its config
+# has a syntax error, so writing a broken sudoers file to a box whose only
+# other account you have just hardened is a genuinely unrecoverable mistake on
+# a cloud VM with no console. `visudo -cf` checks the candidate file BEFORE it
+# is moved into place; if the check fails, the task fails and the old file is
+# untouched.
+#
+# The same pattern guards sshd_config in `lockup`. Both are cases where the
+# tool that validates the config is the tool that would otherwise lock you out.
+- name: Grant passwordless sudo to the operator account
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/90-ensemble-{{ crew_user }}"
+    content: |
+      # Managed by ensemble/rehearsal. Do not edit by hand.
+      #
+      # NOPASSWD sudo means this account is root with extra steps. That is a
+      # real cost, accepted here because the alternative — a sudo password
+      # stored in a vault and prompted on every play — adds a secret to manage
+      # for very little gain on a single-operator box.
+      {{ crew_user }} ALL=(ALL) NOPASSWD:ALL
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "/usr/sbin/visudo -cf %s"
+  when: crew_passwordless_sudo | bool
+
+- name: Remove the sudo grant when it has been turned off
+  ansible.builtin.file:
+    path: "/etc/sudoers.d/90-ensemble-{{ crew_user }}"
+    state: absent
+  when: not (crew_passwordless_sudo | bool)

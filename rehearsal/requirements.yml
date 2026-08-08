@@ -1,0 +1,28 @@
+# =============================================================================
+# rehearsal / requirements.yml — collections this layer depends on
+# =============================================================================
+#
+# Install with:
+#   ansible-galaxy collection install -r requirements.yml
+#
+# Ansible split into `ansible-core` (the engine plus a small builtin module set)
+# and separately versioned *collections* that hold everything else. If you
+# installed the batteries-included `ansible` package these are already present;
+# if you installed `ansible-core` they are not, and the playbook fails with
+# "couldn't resolve module/action" — which reads like a typo rather than a
+# missing dependency.
+#
+# Declaring them here makes that a one-command fix instead of a guess.
+# =============================================================================
+
+collections:
+  # Provides ansible.posix.sysctl (kernel parameters, written idempotently to a
+  # file rather than shelled out) and ansible.posix.authorized_key.
+  - name: ansible.posix
+    version: ">=1.5.4"
+
+  # Provides community.general.ufw (the firewall) and community.general.modprobe
+  # (kernel modules, with persistence). The >=8.0.0 floor is for modprobe's
+  # `persistent` parameter, which is what makes br_netfilter survive a reboot.
+  - name: community.general
+    version: ">=8.0.0"

@@ -1,0 +1,9 @@
+---
+# Handlers run once at the end of the play, and only if something notified them.
+# That's the point: ten tasks can each notify "Restart cron" and it restarts
+# once, after all of them are done, rather than ten times mid-configuration.
+
+- name: Restart cron
+  ansible.builtin.service:
+    name: cron
+    state: restarted

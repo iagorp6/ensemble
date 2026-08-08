@@ -39,6 +39,19 @@ crash.*.log
 rehearsal/inventory.ini
 *.retry
 
+# The kubeconfig orchestra pulls back from the node. This is a CREDENTIAL — it
+# embeds a client certificate with cluster-admin rights on the cluster, and
+# anyone holding it owns everything running there. Committing it would be the
+# single worst mistake available in this repo.
+rehearsal/kubeconfig*
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+
+# Collections installed from requirements.yml. Reinstallable, not source.
+rehearsal/collections/
+rehearsal/*.log
+
 # ---------------------------------------------------------------------------
 # backstage/ — secrets
 # ---------------------------------------------------------------------------

@@ -1,0 +1,36 @@
+---
+# orchestra — role defaults. Override in group_vars/ensemble.yml.
+
+k3s_version: "v1.36.3+k3s1"
+k3s_tls_sans: []
+k3s_secrets_encryption: true
+k3s_extra_server_args: []
+
+k3s_fetch_kubeconfig: true
+k3s_kubeconfig_local_path: "./kubeconfig.podium"
+
+# Where the downloaded installer lives. Kept on disk rather than piped straight
+# into a shell so that what ran is inspectable afterwards.
+k3s_installer_path: /usr/local/share/ensemble/k3s-install.sh
+
+# Kernel settings Kubernetes needs. K3s sets most of these itself at startup,
+# but doing it here means they're in /etc/sysctl.d and survive a reboot
+# independently of whether K3s got as far as starting.
+k3s_sysctls:
+  # Packets arriving for a pod have to be routed on to it. Off by default on
+  # Ubuntu, and without it nothing in the cluster can reach anything else.
+  net.ipv4.ip_forward: "1"
+
+  # Traffic crossing the CNI bridge must be visible to iptables, or kube-proxy's
+  # service rules never see it and ClusterIP services silently don't work.
+  net.bridge.bridge-nf-call-iptables: "1"
+  net.bridge.bridge-nf-call-ip6tables: "1"
+
+  # Not a Kubernetes requirement, and the one most likely to bite later.
+  # Every container that watches files takes inotify instances from a
+  # system-wide pool whose default is small. `metronome` (layer 6) adds
+  # Prometheus, Grafana, Loki and their sidecars, and the failure mode when the
+  # pool is exhausted is pods crash-looping with "too many open files" — which
+  # sends you looking at ulimits, where the answer isn't.
+  fs.inotify.max_user_instances: "512"
+  fs.inotify.max_user_watches: "524288"

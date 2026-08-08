@@ -1,0 +1,122 @@
+---
+# =============================================================================
+# rehearsal — bring the provisioned node to a known-good, cluster-ready state
+# =============================================================================
+#
+# Layer 2 of ensemble. Layer 1 (`tuning`) produced a bare Ubuntu VM with an SSH
+# key on it and nothing else. This is what turns that into a machine the rest
+# of the platform can be built on.
+#
+# THE PROPERTY THAT MATTERS: this playbook is idempotent. Running it twice is
+# indistinguishable from running it once, and the second run reports zero
+# changes. That is not a nice-to-have here, it's the whole reason configuration
+# management exists as a category. A shell script that installs things answers
+# "what do I do to a fresh machine?" — a playbook answers "what should be true
+# of this machine?", which is a question you can ask repeatedly, at any time,
+# against a host in any state.
+#
+# What it buys concretely:
+#   - Re-running after a partial failure is safe. No "which step did it get to?"
+#   - Drift is correctable. Somebody edited sshd_config by hand at 2am; run this
+#     and it's back.
+#   - `--check` becomes an audit. It reports what WOULD change without touching
+#     anything, which is how you find drift before it bites.
+#   - Rebuilding the node from scratch is a known quantity, so `terraform
+#     destroy` stops being frightening.
+#
+# Idempotency is not automatic. Ansible's modules are declarative and mostly
+# get it for free, but every `command` and `shell` task is an escape hatch back
+# into imperative scripting, and each one has to earn its idempotency with an
+# explicit `creates:`, `changed_when:` or a guard condition. Every such task in
+# this layer carries a comment saying how it does that. Search the roles for
+# "IDEMPOTENCY:" to read them all.
+#
+# Verify the claim rather than trusting it:
+#   ansible-playbook playbook.yml           # first run: lots of changed
+#   ansible-playbook playbook.yml           # second run: changed=0
+#
+# =============================================================================
+#
+# ORDER MATTERS, and not for the obvious reasons:
+#
+#   warmup      first, because everything below needs a current apt cache, and
+#               because the root filesystem has to actually be 100 GB before
+#               anything starts filling it.
+#   crew        before hardening, so the account exists and has a working key
+#               before sshd starts refusing logins.
+#   doorman     before lockup, so ufw exists for fail2ban to ban into.
+#   lockup      before the cluster, so the node isn't sitting on the public
+#               internet with default sshd settings while Kubernetes installs.
+#   roadcase    before orchestra only by convention; they're independent.
+#   orchestra   last of the building roles — it's the payload everything else
+#               was preparing for.
+#   soundcheck  last, and it only asserts. If it fails, something above lied.
+# =============================================================================
+
+- name: rehearsal — configure the ensemble node
+  hosts: ensemble
+
+  # Nearly every task here writes to /etc or manages a service, so escalation is
+  # declared once at the play level rather than repeated on 60 tasks. The
+  # exceptions run with `become: false` and say why.
+  become: true
+
+  # Facts are the node describing itself — distribution, architecture, mounts,
+  # memory. This layer leans on them heavily rather than hardcoding: the Docker
+  # repo line is built from the real architecture and release, and the
+  # filesystem check reads real mount data. That's what makes the same playbook
+  # correct on aarch64 and x86_64 without a branch.
+  gather_facts: true
+
+  pre_tasks:
+    # A freshly booted cloud VM is not ready the moment SSH answers. cloud-init
+    # is still expanding the root partition, installing packages and writing
+    # /etc/apt sources — and it holds the dpkg lock while it does. Starting an
+    # apt task into that produces a lock-timeout failure that looks like a bug
+    # in this playbook and isn't.
+    #
+    # IDEMPOTENCY: `cloud-init status --wait` blocks until first boot completes
+    # and returns immediately forever after, so it costs nothing on later runs.
+    # It never changes anything, hence changed_when: false.
+    - name: Wait for cloud-init to finish its first-boot work
+      ansible.builtin.command: cloud-init status --wait
+      register: cloudinit_status
+      changed_when: false
+      # 0 = done. 2 = done, with a recoverable warning (common on OCI images and
+      # not worth failing over). Anything else is a real problem.
+      failed_when: cloudinit_status.rc not in [0, 2]
+
+    - name: Confirm this is a distribution these roles actually know
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_major_version | int >= 24
+        fail_msg: >-
+          rehearsal targets Ubuntu 24.04 or newer and found
+          {{ ansible_distribution }} {{ ansible_distribution_version }}.
+          The roles assume Ubuntu specifics — sshd_config.d drop-ins, journald
+          without rsyslog, and the Docker apt repo layout — so failing loudly
+          here beats failing obscurely four roles in.
+        quiet: true
+
+  roles:
+    - role: warmup
+      tags: [warmup, base]
+
+    - role: crew
+      tags: [crew, users]
+
+    - role: doorman
+      tags: [doorman, firewall]
+
+    - role: lockup
+      tags: [lockup, hardening]
+
+    - role: roadcase
+      tags: [roadcase, docker]
+
+    - role: orchestra
+      tags: [orchestra, k3s]
+
+    - role: soundcheck
+      tags: [soundcheck, verify]

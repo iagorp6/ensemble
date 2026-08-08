@@ -1,0 +1,17 @@
+// {{ ansible_managed }}
+// ensemble / rehearsal / lockup — the switch that turns unattended upgrades on
+//
+// Installing the unattended-upgrades package does not enable it. This file is
+// what systemd's apt-daily and apt-daily-upgrade timers read to decide whether
+// to do anything, and without it the package sits installed and idle — which
+// looks exactly like working.
+
+// Refresh package lists daily.
+APT::Periodic::Update-Package-Lists "1";
+
+// Actually apply what the policy in 52-ensemble-unattended-upgrades allows.
+APT::Periodic::Unattended-Upgrade "{{ '1' if lockup_unattended_upgrades else '0' }}";
+
+// Clear the downloaded .deb cache weekly. Small, but this is a 100 GB disk that
+// will also be holding container images, Prometheus metrics and Loki chunks.
+APT::Periodic::AutocleanInterval "7";

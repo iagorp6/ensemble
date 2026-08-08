@@ -1,0 +1,29 @@
+---
+# doorman — role defaults. Override in group_vars/ensemble.yml.
+
+doorman_ssh_allowed_from: any
+doorman_kube_api_allowed_from: any
+doorman_open_http: true
+
+# K3s defaults. Change these only if K3s is started with matching
+# --cluster-cidr / --service-cidr flags, or pod networking breaks.
+doorman_pod_cidr: 10.42.0.0/16
+doorman_service_cidr: 10.43.0.0/16
+
+# Flannel's VXLAN overlay port and the kubelet's API. Only genuinely needed
+# once there's a second node, but allowing them from inside the VCN costs
+# nothing and means adding that node isn't also a firewall debugging session.
+doorman_vxlan_port: "8472"
+doorman_kubelet_port: "10250"
+
+# ufw's own logging. "low" records blocked packets without filling the journal.
+doorman_logging: "low"
+
+# The blanket REJECT rules Oracle's Ubuntu image ships preinstalled. Listed as
+# data rather than buried in a task so it's obvious exactly what gets removed —
+# and so the IPv6 variants, which use a different reject target, aren't missed.
+doorman_oci_reject_rules:
+  - { bin: iptables, chain: INPUT, reject_with: icmp-host-prohibited }
+  - { bin: iptables, chain: FORWARD, reject_with: icmp-host-prohibited }
+  - { bin: ip6tables, chain: INPUT, reject_with: icmp6-adm-prohibited }
+  - { bin: ip6tables, chain: FORWARD, reject_with: icmp6-adm-prohibited }
