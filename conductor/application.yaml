@@ -1,0 +1,126 @@
+# =============================================================================
+# conductor / application.yaml — downbeat, the root Application
+# =============================================================================
+#
+# A conductor's downbeat is the gesture that starts everything. This is the one
+# object that has to be applied by hand, exactly once, and after that nothing
+# reaches this cluster except through Git.
+#
+# WHAT AN ARGOCD `Application` ACTUALLY IS
+#
+# A custom resource that says: "the contents of THIS path in THIS Git repo
+# should be running in THIS cluster." ArgoCD's application controller watches
+# it, compares Git against live cluster state on a loop, and reconciles the
+# difference.
+#
+# That's the same shape as the two layers before it — Terraform reconciles cloud
+# resources against .tf files, Ansible reconciles a host against a playbook,
+# ArgoCD reconciles a cluster against a Git directory. Three tools, one idea:
+# describe the destination and let something else work out the route. What's
+# new here is that the reconciliation never stops.
+#
+# THE APP-OF-APPS PATTERN
+#
+# This Application points at a DIRECTORY and recurses. Anything valid in there
+# gets applied — including other Application objects. So adding a workload to
+# the platform means committing a file, and the root app picks it up on its
+# next poll. Layer 6 arrives that way: an Application for the Helm-based
+# observability stack, dropped into manifests/, deployed by this one.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: downbeat
+  namespace: argocd
+  finalizers:
+    # Without this, deleting the Application deletes only the Application and
+    # orphans everything it created — pods keep running with nothing managing
+    # them. The finalizer makes deletion cascade properly.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/iagorp6/ensemble.git
+
+    # An explicit branch, not HEAD. `targetRevision: HEAD` follows the repo's
+    # default branch wherever it points, which is fine until the day the default
+    # branch changes and production follows it without anyone deciding to.
+    #
+    # This can also be a tag or a commit SHA. Pinning to a tag is how you'd run
+    # releases rather than a branch — the deploy then becomes "move the tag",
+    # which is still a Git operation and still has an author and a diff.
+    targetRevision: main
+
+    path: conductor/manifests
+
+    directory:
+      # Descend into subdirectories. This is what makes manifests/ a tree of
+      # workloads rather than one flat pile of YAML.
+      recurse: true
+      # ArgoCD only reads .yaml/.yml/.json from a directory source, so markdown
+      # is skipped anyway. Stated explicitly because relying on an unstated
+      # default is how a docs file eventually gets applied as a manifest. The
+      # brace form is what covers nested paths as well as the top level.
+      exclude: "{README.md,**/README.md}"
+
+  destination:
+    # The cluster ArgoCD is running in. ArgoCD can manage remote clusters too,
+    # but here the thing being deployed to and the thing doing the deploying are
+    # the same cluster — which is why no cluster credential has to exist
+    # anywhere outside it.
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    # ---------------------------------------------------------------------
+    # THE TWO FLAGS THAT MAKE THIS GITOPS RATHER THAN A DEPLOY BUTTON
+    # ---------------------------------------------------------------------
+    automated:
+      # selfHeal: if the live cluster drifts from Git, put it back.
+      #
+      # This is the one to demonstrate. Run:
+      #   kubectl scale deploy/overture -n overture --replicas=5
+      # and watch it return to the replica count in Git within seconds. The
+      # cluster is not a place where state is authored; it's a projection of
+      # the repository. Anything done with kubectl is temporary by design.
+      #
+      # It also means an intruder with cluster access can't quietly leave
+      # something running — the controller keeps reverting it, which is a
+      # genuinely useful security property nobody designs for on purpose.
+      selfHeal: true
+
+      # prune: delete resources that have been removed from Git.
+      #
+      # Without this, deleting a file stops updating a resource but leaves it
+      # running forever, and the cluster slowly fills with things nobody
+      # remembers deploying. With it, `git rm` is a real uninstall.
+      #
+      # It is also the flag that will delete things if you point the path at
+      # the wrong directory, which is why the path above is explicit.
+      prune: true
+
+      # Sync when the desired state changes even if the live state hasn't
+      # drifted — catches Git-side changes promptly rather than on the next
+      # full comparison.
+      allowEmpty: false
+
+    syncOptions:
+      # Create the target namespace if it doesn't exist. Without this, the
+      # first sync of a workload into a new namespace fails with "namespace not
+      # found" and looks like an RBAC problem.
+      - CreateNamespace=true
+      # Apply with server-side apply so field ownership is tracked properly and
+      # large CRDs don't hit the client-side annotation size limit — which is
+      # exactly what layer 6's charts would do.
+      - ServerSideApply=true
+      # Keep the sync from failing wholesale because one resource is briefly
+      # unhealthy during a rollout.
+      - RespectIgnoreDifferences=true
+
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: overture
+  namespace: overture
+  labels:
+    app.kubernetes.io/name: overture
+    app.kubernetes.io/part-of: ensemble
+spec:
+  # Two replicas on a single node. Not high availability — one node means one
+  # failure domain, and both pods die together if it does. What it does buy is
+  # a rolling update that never drops to zero, and a visible thing to change
+  # when demonstrating that ArgoCD reverts drift.
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: overture
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: overture
+        app.kubernetes.io/part-of: ensemble
+      annotations:
+        # Layer 6 will configure Prometheus to discover targets by these
+        # annotations. Putting them in now costs nothing and means the app is
+        # already scrapeable the moment there's something to scrape it.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9898"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Spread replicas across nodes when there is more than one. With a single
+      # node this is a no-op that becomes correct for free the day a second node
+      # joins — `ScheduleAnyway` means it never blocks scheduling in the
+      # meantime, which the stricter `DoNotSchedule` would.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: overture
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: overture
+          # ---------------------------------------------------------------
+          # THE ONE LINE LAYER 3 REPLACES.
+          #
+          # `score` will build an arm64 image, push it to
+          # ghcr.io/iagorp6/overture, and this becomes that reference. Nothing
+          # else in this directory changes.
+          #
+          # Pinned to an exact version, never `:latest`. A mutable tag makes
+          # the deployed state unknowable — two pods started an hour apart can
+          # be running different code, and rolling back means hoping the old
+          # image still exists under a tag that has since moved.
+          # ---------------------------------------------------------------
+          image: ghcr.io/stefanprodan/podinfo:6.14.1
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 9898
+              protocol: TCP
+
+          # Liveness and readiness answer different questions, and conflating
+          # them is one of the most common Kubernetes mistakes.
+          #
+          #   readiness: "should traffic be sent here?" Failing removes the pod
+          #              from the Service's endpoints. Recoverable, no restart.
+          #   liveness:  "is this process wedged?" Failing KILLS the container.
+          #
+          # Pointing liveness at a dependency-checking endpoint is how a brief
+          # database blip turns into every pod restarting simultaneously. So
+          # liveness checks only that this process is alive; readiness is where
+          # dependency checks belong.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # Same reasoning as the ArgoCD chart values: CPU requests but no CPU
+          # limit, because a CPU limit throttles via the kernel's CFS quota even
+          # when the node is completely idle. Memory gets a hard limit because
+          # memory is incompressible — a process that wants more than exists
+          # can only be killed, not slowed.
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+
+          # readOnlyRootFilesystem means anything that writes needs somewhere to
+          # write. An emptyDir is a tmpfs-backed scratch space that dies with the
+          # pod, which is the right lifetime for temporary files.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}

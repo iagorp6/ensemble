@@ -1,0 +1,36 @@
+# =============================================================================
+# overture — the opening piece, and the first thing this platform deploys
+# =============================================================================
+#
+# An overture is what an ensemble plays first. This is the demo workload that
+# proves the GitOps loop end to end: it exists in Git, ArgoCD put it here, and
+# nobody ran kubectl to make that happen.
+#
+# THE IMAGE IS A PLACEHOLDER, AND THAT'S THE SEAM WITH LAYER 3.
+#
+# Right now it runs stefanprodan/podinfo — a small purpose-built demo service.
+# Layer 3 (`score`) builds a real application and pushes it to GHCR, and the
+# only thing that changes here is the image reference in deployment.yaml.
+#
+# podinfo was chosen rather than something simpler because it earns its place
+# across two layers: it publishes a Prometheus /metrics endpoint, which is
+# exactly what `metronome` (layer 6) needs something to scrape. A placeholder
+# that nginx would have satisfied would have to be replaced twice.
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: overture
+  labels:
+    app.kubernetes.io/part-of: ensemble
+    # Enforce the restricted Pod Security Standard for everything in this
+    # namespace. It's a namespace label rather than a policy engine — built into
+    # Kubernetes, zero runtime cost, and it rejects privileged pods at admission
+    # rather than after they're running.
+    #
+    # This is the cheap 80% of what a policy layer like Kyverno or Gatekeeper
+    # would give. Adding one of those is noted in the README's "what I'd add
+    # next" rather than built, because seven layers is already the scope.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted

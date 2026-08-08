@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: overture
+  namespace: overture
+  labels:
+    app.kubernetes.io/name: overture
+    app.kubernetes.io/part-of: ensemble
+spec:
+  # ClusterIP, not NodePort or LoadBalancer.
+  #
+  # NodePort would open a high port on the host, which layer 2's ufw rules
+  # deliberately don't allow and which bypasses the ingress entirely.
+  # LoadBalancer on K3s means ServiceLB claiming ports 80/443 on the node,
+  # which is Traefik's job here.
+  #
+  # So: internal-only Service, reached from outside through the Ingress. One
+  # front door, and the firewall rules only have to describe one.
+  type: ClusterIP
+
+  selector:
+    app.kubernetes.io/name: overture
+
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

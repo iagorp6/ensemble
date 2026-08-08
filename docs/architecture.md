@@ -6,7 +6,7 @@ decisions get argued rather than stated.
 Written incrementally — each layer gets its section as it's built, so this file
 tracks the real state of the repo rather than an aspirational one.
 
-**Built so far:** layers 1 (`tuning`) and 2 (`rehearsal`).
+**Built so far:** layers 1 (`tuning`), 2 (`rehearsal`) and 4 (`conductor`).
 
 ---
 
@@ -350,18 +350,105 @@ the firewall. Each of those has a specific trap in this layer.
 
 ---
 
-## Layers 3–7
+## Layer 4 — `conductor`
 
-Not built yet. Each gets a section here as it lands, with the same
-decisions-worth-defending treatment.
+Full documentation: [conductor/README.md](../conductor/README.md).
+
+Built before layer 3 because it doesn't depend on it. ArgoCD needed the cluster
+layer 2 produced; `score` needs nothing but a repository. The seam between them
+is one image tag.
+
+### The loop
+
+```mermaid
+flowchart LR
+    git[("GitHub<br/>conductor/manifests/")]
+
+    subgraph cluster["K3s cluster"]
+        subgraph argons["namespace: argocd"]
+            repo["repo-server"]
+            ctrl["application-controller"]
+            api["server (UI/API)"]
+        end
+        app["overture<br/>namespace: overture"]
+    end
+
+    laptop["laptop"]
+
+    git -. "polls, every 3 min" .-> repo
+    repo --> ctrl
+    ctrl -- "apply / prune / revert drift" --> app
+    api <--> ctrl
+    laptop -. "port-forward only" .-> api
+```
+
+Every arrow touching the cluster points inward and is initiated from inside.
+That's what pull-based means structurally, and it's why no credential capable of
+changing this cluster exists anywhere outside it once bootstrap is done.
+
+### Decisions worth defending
+
+**The bootstrap seam is admitted, not hidden.** Something has to install the
+thing that watches Git, and that something cannot itself be GitOps. Every GitOps
+setup has this seam; most bury it in a README bullet. Here it's one idempotent
+script, `bootstrap/install.sh`, and the moment it finishes the laptop's
+kubeconfig stops being load-bearing.
+
+**`selfHeal` and `prune` are what make it GitOps rather than a deploy button.**
+Without `selfHeal`, a `kubectl edit` persists silently until the next deploy and
+the cluster is authored in two places. Without `prune`, deleting a file stops
+updating a resource but leaves it running forever. Together they make the
+cluster a projection of the repository rather than a place where state
+accumulates.
+
+**No public ingress for the ArgoCD UI.** Layer 1 opened 80/443 for the
+application; ArgoCD is deliberately not on them. Its API can change anything in
+the cluster, so exposing it publicly makes it the highest-value target on the
+platform behind one password. A port-forward costs one command — and
+`AllowTcpForwarding`, which layer 2 kept on, is what makes that the cheap
+option.
+
+**CPU requests, no CPU limits.** A CPU limit is enforced by the kernel's CFS
+quota and throttles *even when the node is idle*, converting spare capacity into
+latency on a two-core box. Memory is incompressible — a process wanting more RAM
+than exists can only be killed — so memory gets a hard limit. Requests total
+550m CPU and 1 GB RAM across five workloads.
+
+**`crds.keep: true`.** Otherwise `helm uninstall` deletes the `Application` CRD,
+which deletes every Application, whose finalizers then delete every deployed
+workload. Uninstalling the deployment tool would take production with it.
+
+**`applicationSet` stays on because it cannot be turned off.** Chart 10.x
+removed the `enabled` key. Writing `applicationSet.enabled: false` is not an
+error in Helm — it's silently nothing, which is the most irritating class of
+config bug. Verified by rendering the chart and checking the workload is present.
+
+### Verification
+
+The chart was rendered locally with these values and asserted against, rather
+than trusted: dex and notifications absent, ApplicationSet present, no Ingress,
+`server.insecure` landing in `argocd-cmd-params-cm`, no CPU limits anywhere,
+every workload carrying requests. The rendered output and the repo's own
+manifests were then schema-checked against real Kubernetes and CRD schemas.
+
+podinfo's `linux/arm64` support was confirmed from the registry's manifest
+index — the constraint layer 1 propagated, and the likeliest cause of a
+crash-loop on this platform.
+
+---
+
+## Layers 3, 5, 6, 7
+
+Not built yet. Each gets a section here as it lands.
 
 Known constraints carried forward:
 
-- **`score`** must build `linux/arm64`. An amd64 image pulls onto this node and
-  dies with `exec format error`.
-- **`conductor`** gets a cluster whose kubeconfig currently sits on a laptop.
-  Installing ArgoCD is the last thing that uses it that way — after layer 4,
-  changes arrive by Git.
-- **`metronome`** has 12 GB to share with everything else, so retention and
-  scrape intervals are configuration decisions, not defaults. The inotify limits
-  are already raised for it.
+- **`score`** must build `linux/arm64`, and changes exactly one line in
+  `conductor/manifests/overture/deployment.yaml`. It gets registry credentials
+  and deliberately no cluster credentials.
+- **`backstage`** closes the gap layer 4 leaves open: secrets are currently the
+  one piece of cluster state not described in Git, because this repo is public.
+- **`metronome`** has 12 GB shared with everything else, so retention and scrape
+  intervals are configuration decisions rather than defaults. The inotify limits
+  are already raised for it, `overture` already carries the scrape annotations,
+  and it will arrive as an `Application` dropped into `conductor/manifests/`.

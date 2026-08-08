@@ -1,0 +1,47 @@
+# =============================================================================
+# overture — Ingress
+# =============================================================================
+#
+# Traefik ships with K3s and runs as the cluster's ingress controller. Layer 1
+# opened 80/443 in the OCI security list and layer 2 opened them in ufw, so this
+# is the last piece of a path that was built across three layers.
+#
+# NO HOSTNAME, DELIBERATELY.
+#
+# An Ingress with no `host` matches any hostname, so this works immediately at
+# http://<node-ip>/ with no DNS to configure. That is the right trade while
+# there is exactly one thing being served.
+#
+# It stops being right the moment there are two. Layer 6 adds Grafana, and at
+# that point both need names — the practical answer without buying a domain is
+# nip.io, which resolves <anything>.<ip>.nip.io to that IP:
+#
+#   host: overture.203.0.113.42.nip.io
+#
+# That change is itself the demonstration: edit this file, commit, push, and
+# ArgoCD reconciles it. No kubectl, no pipeline, no deploy button.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: overture
+  namespace: overture
+  labels:
+    app.kubernetes.io/name: overture
+    app.kubernetes.io/part-of: ensemble
+spec:
+  # Naming the class explicitly rather than relying on a default. K3s marks
+  # Traefik as the default IngressClass, but "it worked because of a default
+  # somebody else set" is a bad thing to depend on.
+  ingressClassName: traefik
+
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: overture
+                port:
+                  name: http

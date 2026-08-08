@@ -1,0 +1,176 @@
+# =============================================================================
+# conductor / bootstrap / values.yaml — Helm values for the argo-cd chart
+# =============================================================================
+#
+# Chart: argo-cd 10.3.0  (appVersion v3.5.0)
+# Repo:  https://argoproj.github.io/argo-helm
+#
+# Pinned, not "latest". The chart version is the one thing that decides what
+# actually lands on the cluster, and an unpinned `helm install` means the answer
+# to "what's running?" is "whatever was newest the day someone ran it".
+# Check for newer: https://github.com/argoproj/argo-helm/releases
+#
+# EVERY VALUE HERE IS A DECISION ABOUT A 2-OCPU / 12 GB NODE. The chart's
+# defaults assume a real cluster with room to spare. This node has to run
+# ArgoCD, an application, and — after layer 6 — Prometheus, Grafana, Loki and
+# Alertmanager, all at once.
+# =============================================================================
+
+global:
+  # Used by the chart to build ingress hostnames. Nothing here creates an
+  # Ingress (see server.ingress below), so this is only a placeholder that
+  # keeps the chart's templates happy.
+  domain: argocd.localhost
+
+# -----------------------------------------------------------------------------
+# CRDs
+# -----------------------------------------------------------------------------
+crds:
+  install: true
+  # Do NOT delete the CRDs if the release is uninstalled. Deleting an
+  # Application CRD deletes every Application object with it, and ArgoCD's
+  # finalizers would take the deployed workloads down on the way out. Keeping
+  # them means `helm uninstall` removes ArgoCD without removing what it
+  # deployed — which is the behaviour you want at 2am.
+  keep: true
+
+# -----------------------------------------------------------------------------
+# Components turned off
+# -----------------------------------------------------------------------------
+
+# Dex is ArgoCD's embedded SSO broker — it federates GitHub/Google/OIDC logins.
+# There is exactly one operator on this platform and no identity provider to
+# federate with, so it would be ~100 MB running to translate logins that never
+# happen. Local admin auth is what's left, which is appropriate at this size and
+# is the first thing that would change if a second person appeared.
+dex:
+  enabled: false
+
+# The notifications controller sends sync results to Slack, email, webhooks.
+# Nothing to notify yet. Layer 7 (`maestro`) consumes ALERTS from Alertmanager
+# rather than sync events from ArgoCD, so this stays off.
+notifications:
+  enabled: false
+
+# NOTE: there is deliberately no `applicationSet.enabled: false` here. That key
+# does not exist in chart 10.x — ApplicationSet is a core component now, and
+# writing the value would be silently ignored rather than rejected. It gets
+# modest resource requests below instead.
+
+# -----------------------------------------------------------------------------
+# Server configuration
+# -----------------------------------------------------------------------------
+configs:
+  params:
+    # Run the API server without its own TLS.
+    #
+    # By default argocd-server terminates TLS itself, which means anything in
+    # front of it has to either passthrough TLS or re-encrypt — and a proxy
+    # talking HTTPS to a backend with a self-signed cert produces a 502 that
+    # looks like the backend is down. Terminating at the edge (Traefik, or the
+    # SSH tunnel used below) and speaking plain HTTP internally is the simpler,
+    # more debuggable arrangement.
+    #
+    # This is only safe because nothing reaches this service from outside the
+    # cluster — see server.ingress.
+    server.insecure: true
+
+  cm:
+    # Prune resources ArgoCD no longer recognises but keep the diff readable.
+    application.resourceTrackingMethod: annotation
+
+    # Layer 2 turned off the things this cluster doesn't run. Telling ArgoCD to
+    # ignore differences it can't act on keeps applications from sitting
+    # permanently "OutOfSync" for cosmetic reasons, which is how teams learn to
+    # ignore the sync status entirely.
+    resource.compareoptions: |
+      ignoreAggregatedRoles: true
+
+# -----------------------------------------------------------------------------
+# Resource requests — and why there are no CPU limits
+# -----------------------------------------------------------------------------
+#
+# Every component below sets CPU *requests* and memory *requests and limits*,
+# but no CPU limit. That's deliberate and it's the part worth being able to
+# explain:
+#
+#   - A CPU *request* is a scheduling guarantee and a share weight. Under
+#     contention, a pod gets at least its share.
+#   - A CPU *limit* is a hard throttle enforced by the kernel's CFS quota, and
+#     it applies EVEN WHEN THE NODE IS IDLE. A pod limited to 200m gets
+#     throttled at 200m whether the other 1800m are busy or completely free.
+#     On a 2-core node that turns spare capacity into latency for no benefit.
+#   - Memory is different: it's incompressible. A process that wants more RAM
+#     than exists can't be slowed down, only killed. So memory gets a limit, and
+#     the limit is what stops one component OOM-killing the whole node.
+#
+# Requests total ~600m CPU and ~1 GB RAM, leaving the bulk of the node for the
+# application and for layer 6.
+
+controller:
+  # The application controller does the actual reconciliation — diffing live
+  # cluster state against Git, continuously. It's the busiest component and the
+  # one that matters if it's starved.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+
+server:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+  # NO PUBLIC INGRESS, and this is a security decision rather than a shortcut.
+  #
+  # The ArgoCD API server can create, modify and delete anything in the
+  # cluster. Exposing its UI on the public internet makes it the single highest
+  # value target on the platform — and layer 1 deliberately left 80/443 open to
+  # the world for the application's ingress.
+  #
+  # Reaching it through the SSH tunnel that `lockup` (layer 2) kept
+  # AllowTcpForwarding on for costs one command and removes the exposure
+  # entirely:
+  #
+  #   kubectl port-forward svc/argocd-server -n argocd 8080:80
+  #
+  # If you later want it on a hostname, the honest prerequisites are TLS and an
+  # identity provider — which means turning dex back on, not just flipping this.
+  ingress:
+    enabled: false
+
+repoServer:
+  # Clones the Git repo and renders manifests. Memory scales with repo size and
+  # with how much Helm/Kustomize templating it has to do — layer 6's charts will
+  # push this harder than the plain YAML here does.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+redis:
+  # A cache for rendered manifests. Losing it costs re-rendering, not data.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+applicationSet:
+  # Can't be disabled in this chart version, so it's sized to stay out of the
+  # way. It generates Applications from templates — genuinely useful once there
+  # are many similar apps, which is not now.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
