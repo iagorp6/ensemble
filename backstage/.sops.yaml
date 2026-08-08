@@ -1,0 +1,59 @@
+# =============================================================================
+# backstage / .sops.yaml — which files get encrypted, to whom, and how much
+# =============================================================================
+#
+# SOPS reads this automatically. It means `sops encrypt secrets.enc.yaml` needs
+# no flags and, more importantly, that nobody can encrypt to the wrong
+# recipient by forgetting one.
+#
+# THE IDEA THAT MAKES SOPS DIFFERENT
+#
+# Most secret tooling encrypts a whole file into an opaque blob. SOPS encrypts
+# the VALUES and leaves the KEYS and structure in plaintext. So an encrypted
+# file still looks like the YAML it is:
+#
+#     stringData:
+#         OVERTURE_API_TOKEN: ENC[AES256_GCM,data:...,type:str]
+#
+# That is not cosmetic. It means:
+#
+#   - `git diff` shows that a value changed, and WHICH value, without revealing
+#     either version. A reviewer can approve "the API token was rotated"
+#     without being able to read the token.
+#   - Adding a key is a one-line diff instead of a whole-file replacement, so
+#     merge conflicts stay tractable.
+#   - `kubectl` and ArgoCD can still parse the apiVersion/kind/metadata, which
+#     is what lets an encrypted Secret sit in a GitOps directory at all.
+# =============================================================================
+
+creation_rules:
+  # Matches on suffix rather than on a full path, so it applies wherever sops is
+  # invoked from — the repo root, this directory, or a CI checkout. Anchoring to
+  # a directory prefix is the usual cause of "sops encrypted my file to nobody".
+  - path_regex: \.enc\.yaml$
+
+    # ONLY encrypt the payload. Without this, SOPS encrypts every value in the
+    # file including `apiVersion`, `kind`, and `metadata.name` — producing
+    # something Kubernetes cannot route and ArgoCD cannot even identify as a
+    # Secret. The manifest would be perfectly secret and completely useless.
+    #
+    # Leaving metadata readable is also what makes review possible: you can see
+    # that this is a Secret named overture-secrets in namespace overture, and
+    # still not see a single value inside it.
+    encrypted_regex: ^(data|stringData)$
+
+    # The age recipient — the PUBLIC half of the keypair. Publishing it is
+    # harmless; it can encrypt to the holder of the private key and nothing
+    # else. That asymmetry is the whole point: anyone who clones this repo can
+    # ADD a secret, and only key holders can read one.
+    #
+    # ⚠ THIS IS A THROWAWAY DEMO KEY, generated while building this layer so the
+    # committed secrets.enc.yaml is a real encrypted file rather than a
+    # hand-written imitation. It protects one placeholder value and nothing
+    # else. Rotate it before anything real goes in — see README.md, "Rotating".
+    #
+    # Multiple recipients go here one per line, which is how a second engineer
+    # gets access: add their public key, re-encrypt, commit. No shared password,
+    # nothing to transmit privately.
+    age: >-
+      age18qpxpnpjaadz86hw6q89nna0gp02mz3vc2gx24h2nk4s7ws8luwqtmxg7l

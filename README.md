@@ -16,7 +16,7 @@ Each of those is a layer, and the mapping is exact:
 | 2 | [**rehearsal**](rehearsal/) | Ansible | Hardens and configures that VM into a ready state |
 | 3 | [**score**](score/) | GitHub Actions | CI — builds, tests, and pushes a container image |
 | 4 | [**conductor**](conductor/) | ArgoCD | GitOps — watches the manifests and syncs the cluster, unattended |
-| 5 | **backstage** | SOPS + age | Encrypted secrets, safe to commit to Git |
+| 5 | [**backstage**](backstage/) | SOPS + age | Encrypted secrets, safe to commit to Git |
 | 6 | **metronome** | Prometheus · Grafana · Loki · Alertmanager | Observability |
 | 7 | **maestro** | Ollama (local) | AIOps — reads logs and alerts, drafts plain-English cause notes |
 
@@ -33,8 +33,8 @@ between them is a single image reference, which `score` now writes.
 - [x] **2 · rehearsal** — seven idempotent roles: base prep, operator account, firewall, hardening, Docker, K3s, verification.
 - [x] **3 · score** — a Go service with zero dependencies, and a pipeline that cross-compiles arm64 without emulation, attests provenance, and hands the digest to layer 4.
 - [x] **4 · conductor** — ArgoCD on the cluster, a root app-of-apps watching `conductor/manifests/`, self-healing and pruning.
-- [ ] **5 · backstage** — next
-- [ ] **6 · metronome**
+- [x] **5 · backstage** — SOPS + age secrets committed to this public repo, decrypted by ArgoCD at sync, and actually consumed by the app.
+- [ ] **6 · metronome** — next
 - [ ] **7 · maestro**
 
 ---
@@ -142,6 +142,7 @@ runbook. Start at the beginning:
 **2 → [rehearsal](rehearsal/README.md)** — Ansible, hardening, and the K3s cluster.
 **3 → [score](score/README.md)** — the app, and CI that cross-compiles for ARM.
 **4 → [conductor](conductor/README.md)** — ArgoCD, and the GitOps loop.
+**5 → [backstage](backstage/README.md)** — SOPS + age, and secrets in a public repo.
 
 You'll need a free [Oracle Cloud](https://www.oracle.com/cloud/free/) account.
 Everything in this repo is designed to stay inside the Always Free tier, and

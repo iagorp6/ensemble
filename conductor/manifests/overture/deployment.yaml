@@ -78,6 +78,27 @@ spec:
               containerPort: 9898
               protocol: TCP
 
+          # The secret from `backstage` (layer 5), delivered by ArgoCD.
+          #
+          # It travels: SOPS-encrypted in a PUBLIC Git repo -> decrypted by
+          # ksops inside the repo-server at sync time -> applied as a Secret ->
+          # injected here. The value is never in the repo, never in CI, and
+          # never on anyone's laptop except a key holder's.
+          #
+          # `optional: true` is doing real work. Without it, the pod refuses to
+          # start until the Secret exists — so a fresh cluster would deadlock
+          # with overture Pending while ArgoCD is still syncing, and it would
+          # look like a broken deployment rather than an ordering issue. With
+          # it, the service starts, serves everything else, and only /private
+          # reports 503. Degrade, don't refuse.
+          env:
+            - name: OVERTURE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: overture-secrets
+                  key: OVERTURE_API_TOKEN
+                  optional: true
+
           # Liveness and readiness answer different questions, and conflating
           # them is one of the most common Kubernetes mistakes.
           #

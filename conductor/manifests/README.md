@@ -76,11 +76,14 @@ committed file, arbitrarily deep.
 
 ## What does *not* belong here
 
-**Secrets in plaintext.** This directory is public. Layer 5 (`backstage`) is
-where secrets get SOPS-encrypted so they can be committed safely, and ArgoCD
-decrypts them at sync time.
+**Secrets in plaintext.** This directory is public, and a Kubernetes `Secret` is
+base64, not encryption.
 
-Until then, if something needs a credential, create it out-of-band with
-`kubectl create secret` and reference it by name — and accept that it's the one
-piece of cluster state not described here. That gap is exactly what layer 5
-closes.
+That gap is closed. [`backstage/`](../../backstage/) holds SOPS-encrypted
+secrets that are safe to commit here, and
+[`backstage/application.yaml`](backstage/application.yaml) in this directory is
+the Application that deploys them — ArgoCD's repo-server decrypts at sync time,
+in memory.
+
+To add a secret: `sops edit backstage/secrets.enc.yaml`, commit, push. Same
+workflow as everything else in this directory, which is the point.

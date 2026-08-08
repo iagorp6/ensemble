@@ -13,12 +13,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -54,6 +57,20 @@ type infoResponse struct {
 	BuildDate string `json:"buildDate"`
 	Hostname  string `json:"hostname"`
 	Message   string `json:"message"`
+
+	// Whether a secret was delivered — never what it is.
+	//
+	// This is the observable half of layer 5. `backstage` SOPS-encrypts a token
+	// into a public Git repository, ArgoCD decrypts it at sync time, and it
+	// arrives here as an environment variable. Something has to prove that
+	// chain worked, and the obvious way — echoing the value — would defeat the
+	// entire exercise.
+	//
+	// So the app reports the FACT of delivery and gates a real endpoint on the
+	// value. That is the general shape of the answer: prove a secret arrived by
+	// demonstrating you can do something only its holder could, never by
+	// showing it.
+	TokenConfigured bool `json:"tokenConfigured"`
 }
 
 func main() {
@@ -65,10 +82,17 @@ func main() {
 		addr = v
 	}
 
+	// Delivered by conductor from the SOPS-encrypted Secret in backstage/.
+	// Empty is a valid state: the service still starts and still serves
+	// everything else, and only the endpoint that needs the token refuses. A
+	// service that won't boot without every optional secret is a service that
+	// can't be debugged.
+	token := os.Getenv("OVERTURE_API_TOKEN")
+
 	reg := newRegistry()
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           routes(reg),
+		Handler:           routes(reg, token),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -149,12 +173,13 @@ func gracefulShutdown(srv *http.Server, logger *slog.Logger) error {
 	return nil
 }
 
-func routes(reg *registry) http.Handler {
+func routes(reg *registry, token string) http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /", handleInfo)
+	mux.HandleFunc("GET /", handleInfo(token))
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.HandleFunc("GET /readyz", handleReadyz)
+	mux.HandleFunc("GET /private", handlePrivate(token))
 	mux.Handle("GET /metrics", reg.handler())
 
 	// Metrics wrap everything, including /metrics itself.
@@ -162,19 +187,76 @@ func routes(reg *registry) http.Handler {
 }
 
 // handleInfo is the thing a human hits to see what's running.
-func handleInfo(w http.ResponseWriter, _ *http.Request) {
-	host, err := os.Hostname()
-	if err != nil {
-		host = "unknown"
+func handleInfo(token string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		host, err := os.Hostname()
+		if err != nil {
+			host = "unknown"
+		}
+		writeJSON(w, http.StatusOK, infoResponse{
+			Name:            "overture",
+			Version:         version,
+			Commit:          commit,
+			BuildDate:       buildDate,
+			Hostname:        host,
+			Message:         "the ensemble is playing",
+			TokenConfigured: token != "",
+		})
 	}
-	writeJSON(w, http.StatusOK, infoResponse{
-		Name:      "overture",
-		Version:   version,
-		Commit:    commit,
-		BuildDate: buildDate,
-		Hostname:  host,
-		Message:   "the ensemble is playing",
-	})
+}
+
+// handlePrivate gates an endpoint on the secret from `backstage`.
+//
+// It exists so layer 5 is a demonstration rather than a ceremony. Encrypting a
+// value nothing reads proves only that the encryption command ran; being able
+// to authenticate with it proves the whole chain — SOPS in Git, decryption at
+// sync, delivery into the pod — actually worked.
+func handlePrivate(token string) http.HandlerFunc {
+	const prefix = "Bearer "
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		// No token delivered. 503 rather than 401, because the distinction
+		// matters when debugging: 401 means "your credential is wrong", 503
+		// means "this service has no credential to check against". Collapsing
+		// them sends you looking at the client when the problem is the
+		// deployment.
+		if token == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"error": "no token configured; is the backstage secret mounted?",
+			})
+			return
+		}
+
+		header := r.Header.Get("Authorization")
+		if !strings.HasPrefix(header, prefix) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="overture"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bearer token required"})
+			return
+		}
+
+		// Compare hashes, in constant time. Two separate properties:
+		//
+		//   crypto/subtle avoids the early return that == compiles to, so the
+		//   time taken doesn't reveal how many leading bytes were correct.
+		//   Without it an attacker can recover a token byte by byte from
+		//   timing alone.
+		//
+		//   Hashing first makes the comparison length-independent.
+		//   ConstantTimeCompare returns 0 immediately for differing lengths,
+		//   which leaks the token's length — a small leak, and free to close,
+		//   since SHA-256 output is always 32 bytes.
+		got := sha256.Sum256([]byte(strings.TrimPrefix(header, prefix)))
+		want := sha256.Sum256([]byte(token))
+		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="overture"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"message": "authenticated — the backstage secret made it all the way here",
+		})
+	}
 }
 
 // handleHealthz answers LIVENESS: "is this process wedged?"

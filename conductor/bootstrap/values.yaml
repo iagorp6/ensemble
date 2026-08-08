@@ -79,6 +79,27 @@ configs:
     # Prune resources ArgoCD no longer recognises but keep the diff readable.
     application.resourceTrackingMethod: annotation
 
+    # Required by `backstage` (layer 5). KSOPS is a kustomize *exec* plugin —
+    # kustomize runs it as a binary — and both flags are needed to permit that.
+    #
+    # `--enable-exec` DESERVES A PAUSE. It lets a kustomization in this
+    # repository cause the repo-server to execute a binary. The repo-server has
+    # no cluster credentials and cannot apply anything itself, so this is not
+    # equivalent to cluster admin — but it is remote code execution in a pod
+    # that holds the SOPS decryption key, which is the most sensitive thing on
+    # this platform.
+    #
+    # It is accepted here because the only writer to this repository is me, and
+    # the alternative designs each cost more than they save at this size:
+    # Sealed Secrets means a controller and a different key model, External
+    # Secrets means running a separate secret store to point it at. Both are
+    # better answers with a team; neither is better with one operator.
+    #
+    # What would change my mind: a second person with commit access. At that
+    # point the flag means anyone who can merge can run code next to the
+    # decryption key, and branch protection on this path stops being optional.
+    kustomize.buildOptions: --enable-alpha-plugins --enable-exec
+
     # Layer 2 turned off the things this cluster doesn't run. Telling ArgoCD to
     # ignore differences it can't act on keeps applications from sitting
     # permanently "OutOfSync" for cosmetic reasons, which is how teams learn to
@@ -154,6 +175,72 @@ repoServer:
       memory: 256Mi
     limits:
       memory: 512Mi
+
+  # ---------------------------------------------------------------------------
+  # KSOPS — what lets ArgoCD decrypt `backstage`'s secrets at sync time
+  # ---------------------------------------------------------------------------
+  #
+  # The repo-server is the only component that ever sees plaintext, and only in
+  # memory, only during a render. Nothing is written to disk and nothing leaves
+  # this pod undecrypted-to-encrypted.
+  #
+  # This is also the component that holds the age private key, which makes it
+  # the highest-value pod on the cluster. Note what it does NOT have: cluster
+  # credentials. It renders manifests and hands them to the application
+  # controller, which is what applies them.
+  initContainers:
+    - name: install-ksops
+      # v4.5.1 is genuinely multi-architecture — verified against the registry
+      # manifest, not inferred from the tag. There is also a `v4.5.1-arm64`
+      # tag, which looks like the right choice on an Ampere node and is the
+      # WRONG one: it is a single-arch manifest, so it pins the image to arm64
+      # and breaks anywhere else. The plain tag resolves per-node.
+      image: viaductoss/ksops:v4.5.1
+      command: ["/bin/sh", "-c"]
+      args:
+        - echo "installing ksops and kustomize into /custom-tools" &&
+          cp ksops /custom-tools/ &&
+          cp "$GOPATH"/bin/kustomize /custom-tools/
+      volumeMounts:
+        - name: custom-tools
+          mountPath: /custom-tools
+
+  volumes:
+    # Shared with the init container above. emptyDir because these are binaries
+    # recreated on every pod start, not state.
+    - name: custom-tools
+      emptyDir: {}
+
+    # The age PRIVATE key, as a Kubernetes Secret. It is created out-of-band by
+    # backstage/install-key.sh — it cannot come from Git, because it is the key
+    # that decrypts Git.
+    #
+    # That is the same bootstrap seam as layer 4, one level down: something
+    # outside the system has to establish the first credential. Naming it is
+    # more honest than pretending a GitOps setup has no starting point.
+    - name: sops-age-key
+      secret:
+        secretName: sops-age-key
+        optional: true
+
+  volumeMounts:
+    # ArgoCD ships its own kustomize; this replaces it with the KSOPS-aware
+    # build from the init container.
+    - name: custom-tools
+      mountPath: /usr/local/bin/kustomize
+      subPath: kustomize
+    - name: custom-tools
+      mountPath: /usr/local/bin/ksops
+      subPath: ksops
+    - name: sops-age-key
+      mountPath: /home/argocd/.config/sops/age
+      readOnly: true
+
+  env:
+    # Where sops looks for the decryption key. The Secret's key must be named
+    # `keys.txt` for this path to resolve — install-key.sh does that.
+    - name: SOPS_AGE_KEY_FILE
+      value: /home/argocd/.config/sops/age/keys.txt
 
 redis:
   # A cache for rendered manifests. Losing it costs re-rendering, not data.

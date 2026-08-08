@@ -6,7 +6,7 @@ decisions get argued rather than stated.
 Written incrementally — each layer gets its section as it's built, so this file
 tracks the real state of the repo rather than an aspirational one.
 
-**Built so far:** layers 1 (`tuning`), 2 (`rehearsal`), 3 (`score`) and 4 (`conductor`).
+**Built so far:** layers 1 (`tuning`), 2 (`rehearsal`), 3 (`score`), 4 (`conductor`) and 5 (`backstage`).
 
 ---
 
@@ -533,23 +533,104 @@ The next push touching `score/**` exercises them.
 
 ---
 
-## Layers 5, 6, 7
+## Layer 5 — `backstage`
 
-Not built yet. Each gets a section here as it lands.
+Full documentation: [backstage/README.md](../backstage/README.md).
 
-Known constraints carried forward:
+Closes the one hole layer 4 left. A Kubernetes `Secret` is base64, not
+encryption — `kubectl get secret -o yaml | base64 -d` is the documented way to
+read one. So a Secret committed to a public repository is a plaintext credential
+with an extra step, and that was the single piece of cluster state Git could not
+describe.
 
-- **`backstage`** closes the gap layer 4 left open: secrets are the one piece of
-  cluster state not described in Git, because this repo is public. Note it does
-  *not* need to solve a GHCR pull secret — a package published with
-  `GITHUB_TOKEN` inherits the repository's visibility, and this repo is public,
-  so the cluster pulls anonymously. Verified against the registry rather than
-  assumed. A private repo would need that secret, and it is the obvious worked
-  example even so.
+```mermaid
+flowchart LR
+    dev["sops edit"] --> git[("public repo<br/>ciphertext only")]
+    subgraph cluster["K3s"]
+        repo["repo-server<br/>+ ksops + age key"]
+        sec[["Secret"]]
+        app["overture"]
+    end
+    key(["age.key — install-key.sh"]) -. "once, out of band" .-> repo
+    git -. pulls .-> repo --> sec --> app
+```
+
+### Decisions worth defending
+
+**SOPS rather than a blob-encrypting tool.** SOPS encrypts values and leaves
+keys and structure readable, so `git diff` shows *that* a token rotated and
+*which* one, without revealing either version. It is also what lets an encrypted
+Secret sit in a GitOps directory at all — `apiVersion`, `kind` and `metadata`
+have to stay parseable, which is what `encrypted_regex: ^(data|stringData)$`
+preserves. Encrypt those too, the default, and the file is perfectly secret and
+completely useless.
+
+**age rather than GPG.** One line for a public key, one for a private. No
+keyring, no trust model, no expiry, no `gpg-agent` failing on a fresh machine.
+GPG's flexibility is precisely what makes onboarding someone onto it hard, and
+onboarding is the operation this layer is chosen for.
+
+**The secret is consumed, not just stored.** Encrypting a value nothing reads
+proves only that the encrypt command ran. `overture` gates `/private` on the
+token and reports `tokenConfigured` — the *fact* of delivery — while never
+echoing the value. A test sweeps every endpoint, authenticated and not,
+asserting the token appears in no body and no header, because that kind of leak
+arrives in a debug field at 2am rather than by design. The comparison is
+constant-time and hashed first, so neither timing nor length leaks.
+
+**`--enable-exec` on the repo-server is a real cost, taken deliberately.** KSOPS
+is a kustomize exec plugin, so the flag permits a kustomization in this repo to
+run a binary in the pod that holds the decryption key. The repo-server has no
+cluster credentials, so this is not cluster admin — but it is RCE next to the
+most sensitive thing on the platform. It is accepted because there is one
+operator; it stops being acceptable the moment a second person has commit
+access, at which point branch protection on that path is mandatory rather than
+optional.
+
+**`optional: true` on the secret reference.** Without it, `overture` refuses to
+start until the Secret exists, so a fresh cluster deadlocks with pods Pending
+while ArgoCD is still syncing — and it presents as a broken deployment rather
+than an ordering problem. With it, the service starts, serves everything else,
+and only `/private` returns 503. Degrade, don't refuse.
+
+**The bootstrap seam again, one level down.** Layer 4 needed something to
+install the thing that watches Git. This needs something to deliver the key that
+decrypts Git. Every secrets-in-GitOps design has this bottom turtle; SOPS makes
+it one age key handed over once. Naming it is more honest than implying a GitOps
+setup has no starting point.
+
+### What it does not protect
+
+Anyone with RBAC to read Secrets in the cluster — the decrypted object is an
+ordinary Secret. The repo-server pod, which holds the key. Metadata: the
+recipient list and the key *names* are public. And anything already leaked,
+since encryption is not rotation.
+
+### Verification
+
+Real round trip with sops 3.13.3 and age 1.3.1: encrypt leaves metadata
+readable and the value as `ENC[AES256_GCM,…]`; decrypt with the key returns the
+original; decrypt without it fails; flipping one ciphertext byte fails the MAC
+rather than silently applying. 26 Go tests pass. The Helm render was asserted
+against for every piece of ksops wiring, and `viaductoss/ksops:v4.5.1` was
+confirmed multi-arch against the registry — the `-arm64`-suffixed tag looks
+like the right choice on an Ampere node and is the wrong one, being single-arch.
+
+The ArgoCD decrypt-at-sync path itself is unrun; it needs a cluster.
+
+---
+
+## Layers 6, 7
+
+Not built yet.
+
 - **`metronome`** has 12 GB shared with everything else, so retention and scrape
   intervals are configuration decisions rather than defaults. The inotify limits
   are already raised for it, `overture` already exposes a histogram and carries
-  the scrape annotations, and it will arrive as an `Application` dropped into
-  `conductor/manifests/`.
+  the scrape annotations, and it arrives as an `Application` dropped into
+  `conductor/manifests/` — the same way `backstage` just did.
 - **`maestro`** consumes Alertmanager webhooks and needs no cluster access —
-  it's a consumer of alerts, not a participant.
+  a consumer of alerts, not a participant. The shared token Alertmanager
+  presents to it belongs in `backstage`, with the wrinkle that maestro runs on a
+  laptop, so its copy is a local `.env` rather than a Kubernetes Secret. Same
+  value, two delivery mechanisms, because the consumers are in different places.

@@ -37,7 +37,7 @@ func TestEndpointStatus(t *testing.T) {
 			t.Cleanup(func() { ready.Store(false) })
 
 			rec := httptest.NewRecorder()
-			routes(newRegistry()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			routes(newRegistry(), "").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("GET %s: got status %d, want %d", tc.path, rec.Code, tc.wantStatus)
@@ -51,7 +51,7 @@ func TestInfoPayload(t *testing.T) {
 	t.Cleanup(func() { ready.Store(false) })
 
 	rec := httptest.NewRecorder()
-	routes(newRegistry()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	routes(newRegistry(), "").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 	var got infoResponse
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
@@ -68,6 +68,132 @@ func TestInfoPayload(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("content-type: got %q, want application/json", ct)
+	}
+}
+
+// =============================================================================
+// The backstage secret (layer 5)
+// =============================================================================
+
+const testToken = "s3cr3t-from-sops"
+
+func TestPrivateEndpointAuthorisation(t *testing.T) {
+	tests := []struct {
+		name       string
+		token      string // what the server was given
+		authHeader string // what the client sent
+		wantStatus int
+	}{
+		// 503 not 401, because the distinction is what tells you whether to
+		// debug the client or the deployment.
+		{"no secret delivered", "", "Bearer " + testToken, http.StatusServiceUnavailable},
+		{"no header", testToken, "", http.StatusUnauthorized},
+		{"wrong scheme", testToken, "Basic " + testToken, http.StatusUnauthorized},
+		{"bare token, no scheme", testToken, testToken, http.StatusUnauthorized},
+		{"wrong token", testToken, "Bearer nope", http.StatusUnauthorized},
+		// A prefix of the real token must not pass. This is the case a naive
+		// strings.HasPrefix check would wave through.
+		{"prefix of the real token", testToken, "Bearer s3cr3t", http.StatusUnauthorized},
+		{"correct token", testToken, "Bearer " + testToken, http.StatusOK},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ready.Store(true)
+			t.Cleanup(func() { ready.Store(false) })
+
+			req := httptest.NewRequest(http.MethodGet, "/private", nil)
+			if tc.authHeader != "" {
+				req.Header.Set("Authorization", tc.authHeader)
+			}
+			rec := httptest.NewRecorder()
+			routes(newRegistry(), tc.token).ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("got status %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			// A 401 without WWW-Authenticate is a protocol violation, and it's
+			// the sort of thing that only bites when a real client is involved.
+			if rec.Code == http.StatusUnauthorized && rec.Header().Get("WWW-Authenticate") == "" {
+				t.Error("401 response is missing the WWW-Authenticate header")
+			}
+		})
+	}
+}
+
+func TestInfoReportsTokenPresenceNotValue(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token string
+		want  bool
+	}{
+		{"secret delivered", testToken, true},
+		{"no secret", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ready.Store(true)
+			t.Cleanup(func() { ready.Store(false) })
+
+			rec := httptest.NewRecorder()
+			routes(newRegistry(), tc.token).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+			var got infoResponse
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatalf("bad JSON: %v", err)
+			}
+			if got.TokenConfigured != tc.want {
+				t.Errorf("tokenConfigured: got %v, want %v", got.TokenConfigured, tc.want)
+			}
+		})
+	}
+}
+
+// THE TEST THAT MATTERS MOST IN THIS LAYER.
+//
+// The entire point of `backstage` is that a secret can live in a public
+// repository without being readable. All of that is undone if the running
+// service hands the value to anyone who asks — and that kind of leak arrives by
+// accident, in a debug field someone added at 2am, not by design.
+//
+// So: sweep every endpoint, authenticated and not, and assert the token appears
+// in no response body and no response header.
+func TestTokenNeverAppearsInAnyResponse(t *testing.T) {
+	ready.Store(true)
+	t.Cleanup(func() { ready.Store(false) })
+
+	h := routes(newRegistry(), testToken)
+
+	requests := []struct {
+		path string
+		auth string
+	}{
+		{"/", ""},
+		{"/healthz", ""},
+		{"/readyz", ""},
+		{"/metrics", ""},
+		{"/private", ""},
+		{"/private", "Bearer wrong"},
+		{"/private", "Bearer " + testToken}, // even when correctly authenticated
+	}
+
+	for _, rq := range requests {
+		req := httptest.NewRequest(http.MethodGet, rq.path, nil)
+		if rq.auth != "" {
+			req.Header.Set("Authorization", rq.auth)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if strings.Contains(rec.Body.String(), testToken) {
+			t.Errorf("GET %s (auth=%q) leaked the token in its body:\n%s", rq.path, rq.auth, rec.Body.String())
+		}
+		for name, values := range rec.Header() {
+			for _, v := range values {
+				if strings.Contains(v, testToken) {
+					t.Errorf("GET %s leaked the token in header %s: %s", rq.path, name, v)
+				}
+			}
+		}
 	}
 }
 

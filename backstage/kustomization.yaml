@@ -1,0 +1,19 @@
+# =============================================================================
+# backstage / kustomization.yaml
+# =============================================================================
+#
+# ArgoCD detects a directory as a Kustomize application when it finds this file,
+# and runs `kustomize build` instead of applying the YAML directly. That is what
+# gives the ksops generator somewhere to run.
+#
+# `resources` is empty on purpose. Nothing here is a plain manifest — the only
+# output of this directory is the Secret that the generator produces by
+# decrypting secrets.enc.yaml.
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources: []
+
+generators:
+  - ./secret-generator.yaml

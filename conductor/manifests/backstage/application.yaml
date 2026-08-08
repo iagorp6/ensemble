@@ -1,0 +1,66 @@
+# =============================================================================
+# conductor/manifests/backstage/application.yaml
+# =============================================================================
+#
+# THE APP-OF-APPS PATTERN, ARRIVING FOR REAL.
+#
+# `downbeat` (conductor/application.yaml) recurses conductor/manifests/ and
+# applies whatever it finds — including other Application objects. This is one.
+# downbeat deploys this Application; this Application deploys the decrypted
+# Secret.
+#
+# It is a separate Application rather than more YAML under manifests/ because
+# backstage/ is a Kustomize directory and needs `kustomize build` run against
+# it. downbeat reads its path as plain manifests, so the two source types can't
+# share one Application. Committing this file is the whole of "add a
+# Kustomize-based component to the platform".
+#
+# Layer 6 lands the same way, with a Helm chart instead.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: backstage
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/iagorp6/ensemble.git
+    targetRevision: main
+    path: backstage
+
+  destination:
+    server: https://kubernetes.default.svc
+    # The Secret's own metadata names namespace `overture`, which is where it
+    # lands. This is only the namespace ArgoCD defaults to for resources that
+    # don't specify one.
+    namespace: overture
+
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+
+  # Secrets are the one resource where ArgoCD's diff view is a liability: it
+  # would render the decrypted value in the UI and in `argocd app diff` output,
+  # which puts the plaintext back on screens after all the work to keep it off
+  # them. Ignoring the data field means ArgoCD still MANAGES the Secret and
+  # still reconciles it — it just won't show you what's inside.
+  #
+  # The cost is real and worth naming: a change to the encrypted value shows up
+  # as "no diff", so the audit trail for a rotation is the Git commit rather
+  # than the ArgoCD UI. That's the right place for it to live anyway.
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: overture-secrets
+      namespace: overture
+      jsonPointers:
+        - /data
