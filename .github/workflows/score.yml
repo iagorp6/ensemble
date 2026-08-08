@@ -1,0 +1,332 @@
+# =============================================================================
+# score — CI for the overture service
+# =============================================================================
+#
+# Layer 3 of ensemble. Tests the service, builds a multi-architecture image,
+# pushes it to GHCR, and tells `conductor` about it by committing the new
+# reference to Git.
+#
+# WHY THIS FILE IS AT THE REPO ROOT AND NOT IN score/
+#
+# GitHub Actions only reads workflows from `.github/workflows/` at the root of
+# the default branch. A workflow at `score/.github/workflows/score.yml` is an
+# ordinary text file that never runs, and nothing warns you — the Actions tab is
+# simply empty.
+#
+# So the workflow lives here and everything else it owns — the service, its
+# tests, its Dockerfile — lives in score/. The layer is still one directory; only
+# this file has to sit where GitHub can see it.
+#
+# THE THING THIS PIPELINE DELIBERATELY CANNOT DO
+#
+# It has no cluster credentials. There is no KUBECONFIG secret, no kubectl step,
+# no cloud login. It can push an image and it can commit to this repository —
+# that is the entire extent of its authority.
+#
+# That is not an omission. A `KUBECONFIG` secret here would mean anyone who can
+# merge a change to this file can run arbitrary commands against the cluster,
+# and workflow files get edited far more casually than infrastructure does.
+# `conductor` runs inside the cluster and pulls; nothing pushes in.
+# =============================================================================
+
+name: score
+
+on:
+  push:
+    branches: [main]
+    # Path filters do double duty here. The obvious job is not rebuilding the
+    # image when only documentation changed.
+    #
+    # The load-bearing job is loop prevention: the `cue` job below commits to
+    # conductor/manifests/, which is a push to main. Without these filters that
+    # commit would trigger this workflow, which would build and commit again,
+    # forever. Because conductor/** is not in this list, the bot's own commit
+    # cannot retrigger it — the loop is closed by design rather than by a
+    # `[skip ci]` marker somebody has to remember.
+    paths:
+      - "score/**"
+      - ".github/workflows/score.yml"
+  pull_request:
+    paths:
+      - "score/**"
+      - ".github/workflows/score.yml"
+  workflow_dispatch:
+
+# Default to the least authority that works. Each job widens this only as far as
+# it needs, and the widening is visible at the job that does it rather than
+# granted globally at the top of the file.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same branch. Three pushes in a minute should
+# produce one image, not three — and on a free-tier project, runner minutes are
+# a real budget.
+concurrency:
+  group: score-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/overture
+  GO_VERSION: "1.26"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # check — does the code hold up?
+  # ---------------------------------------------------------------------------
+  # Runs natively on amd64. Tests do not need to run on the target architecture:
+  # this is pure Go with no assembly and no cgo, so behaviour is identical, and
+  # running them under emulation would cost minutes for no additional signal.
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: score/go.mod
+
+      # gofmt is not a style preference in Go, it is the format. Failing here
+      # means formatting arguments happen in CI once rather than in review
+      # forever.
+      - name: Check formatting
+        working-directory: score
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt'd:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+          echo "all files are gofmt'd"
+
+      # vet catches things that compile but are almost certainly wrong —
+      # printf arguments that don't match their verbs, unreachable code,
+      # struct tags that won't marshal the way they read.
+      - name: Vet
+        working-directory: score
+        run: go vet ./...
+
+      # -race instruments the binary to detect concurrent unsynchronised access
+      # at runtime. The registry in metrics.go is written from every request
+      # goroutine, so this is the check that its locking is actually correct
+      # rather than merely present. It only finds races on code paths the tests
+      # exercise, which is why TestRegistryIsConcurrencySafe hammers it from 50
+      # goroutines.
+      - name: Test
+        working-directory: score
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Report coverage
+        working-directory: score
+        run: |
+          go tool cover -func=coverage.out | tee /dev/stderr | tail -1 >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # press — cut the image
+  # ---------------------------------------------------------------------------
+  press:
+    name: press
+    runs-on: ubuntu-latest
+    needs: check
+
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # OIDC token for the provenance attestation
+      attestations: write
+
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      # NOTE THE ABSENCE OF docker/setup-qemu-action.
+      #
+      # Nearly every multi-arch tutorial installs QEMU here. This pipeline does
+      # not need it: score/Dockerfile pins its build stage to $BUILDPLATFORM and
+      # cross-compiles, and its runtime stage executes nothing. Adding QEMU
+      # would work and would make arm64 builds 10-20x slower for no benefit.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # GITHUB_TOKEN is minted per-run and expires when the run ends. No
+      # long-lived registry credential exists anywhere in this repository — which
+      # is the point of using GHCR rather than an external registry.
+      - name: Log in to GHCR
+        # Never on pull requests: a PR from a fork would otherwise get a token
+        # with package write access.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=overture
+            org.opencontainers.image.description=The opening piece — ensemble's demo service
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: score
+          file: score/Dockerfile
+          # Both architectures, from one x86 runner, without emulation.
+          # amd64 is here so the image is usable on a laptop for local
+          # debugging; arm64 is the one the cluster actually runs.
+          platforms: linux/amd64,linux/arm64
+          # Build on PRs to catch a broken Dockerfile, but never publish from
+          # one. A PR that can push to the registry is a PR that can ship code
+          # nobody approved.
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+          # Persist the Go build cache in GitHub's Actions cache between runs.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      # A signed, verifiable statement that this exact image digest was produced
+      # by this repository, at this commit, by this workflow. Verify it with:
+      #   gh attestation verify oci://ghcr.io/<owner>/overture:<tag> --owner <owner>
+      #
+      # Worth having for a portfolio repo specifically: the honest answer to
+      # "how do I know this image is what the source says it is" should be a
+      # command, not a promise.
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summarise
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Image published"
+            echo
+            echo '```'
+            echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}@${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # cue — tell the conductor
+  # ---------------------------------------------------------------------------
+  # The handoff between layer 3 and layer 4, and the only place they touch.
+  #
+  # This job does NOT deploy. It commits one line to conductor/manifests/, and
+  # ArgoCD — which is watching that directory from inside the cluster — notices
+  # and reconciles. The deploy still happens because Git changed, so it still has
+  # an author, a diff, a timestamp and a revert.
+  #
+  # The alternative is ArgoCD Image Updater, which watches the registry directly
+  # and writes back to Git itself. That removes this job and the `contents:
+  # write` permission with it. It is the better answer at scale; this is the
+  # more legible one, and the mechanism is the same either way.
+  cue:
+    name: cue
+    runs-on: ubuntu-latest
+    needs: press
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    # The only job in this file that can write to the repository, and it can do
+    # nothing else. It cannot push images and it has no OIDC identity.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Point the deployment at the new image
+        env:
+          MANIFEST: conductor/manifests/overture/deployment.yaml
+          NEW_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.press.outputs.tag }}@${{ needs.press.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          # Editing YAML with sed is fragile in general. It is safe here only
+          # because of the assertion below: the file is known to contain exactly
+          # one `image:` key, and the job refuses to guess if that stops being
+          # true. Fail loudly rather than silently rewrite the wrong line.
+          count="$(grep -cE '^[[:space:]]*image:[[:space:]]' "$MANIFEST")"
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Expected exactly one 'image:' line in $MANIFEST, found $count."
+            echo "::error::Refusing to guess which one to update."
+            exit 1
+          fi
+
+          echo "before: $(grep -E '^[[:space:]]*image:' "$MANIFEST")"
+          sed -i -E "s|^([[:space:]]*image:[[:space:]]*).*$|\1${NEW_IMAGE}|" "$MANIFEST"
+          echo "after:  $(grep -E '^[[:space:]]*image:' "$MANIFEST")"
+
+          # Confirm the edit actually landed. A sed that matches nothing exits 0.
+          if ! grep -qF "$NEW_IMAGE" "$MANIFEST"; then
+            echo "::error::sed reported success but the new image is not in the file."
+            exit 1
+          fi
+
+      - name: Commit the new reference
+        env:
+          NEW_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.press.outputs.tag }}@${{ needs.press.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet; then
+            echo "Manifest already points at this image; nothing to commit."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add conductor/manifests/overture/deployment.yaml
+          git commit -m "score: deploy overture ${{ needs.press.outputs.tag }}
+
+          Image: ${NEW_IMAGE}
+          Built from ${{ github.sha }} by ${{ github.workflow }} run ${{ github.run_id }}.
+
+          Committed by CI. ArgoCD reconciles from here — this commit is the
+          deploy, and reverting it is the rollback."
+          git push
+
+      - name: Summarise
+        run: |
+          {
+            echo "### Handed to conductor"
+            echo
+            echo "ArgoCD will reconcile \`conductor/manifests/overture/\` on its next poll."
+            echo
+            echo "To watch it: \`kubectl -n argocd get application downbeat -w\`"
+          } >> "$GITHUB_STEP_SUMMARY"

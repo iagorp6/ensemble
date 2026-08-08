@@ -14,7 +14,7 @@ Each of those is a layer, and the mapping is exact:
 |---|-------|------|--------------|
 | 1 | [**tuning**](tuning/) | Terraform | Provisions the compute — an Oracle Cloud Always Free ARM VM |
 | 2 | [**rehearsal**](rehearsal/) | Ansible | Hardens and configures that VM into a ready state |
-| 3 | **score** | GitHub Actions | CI — builds, tests, and pushes a container image |
+| 3 | [**score**](score/) | GitHub Actions | CI — builds, tests, and pushes a container image |
 | 4 | [**conductor**](conductor/) | ArgoCD | GitOps — watches the manifests and syncs the cluster, unattended |
 | 5 | **backstage** | SOPS + age | Encrypted secrets, safe to commit to Git |
 | 6 | **metronome** | Prometheus · Grafana · Loki · Alertmanager | Observability |
@@ -25,16 +25,15 @@ Each of those is a layer, and the mapping is exact:
 Built one layer at a time, and demoable at every stage rather than only at the
 end.
 
-Layer 4 landed before layer 3 because it doesn't depend on it: ArgoCD needed the
-cluster layer 2 produced, and `score` needs nothing but a repo. The seam between
-them is a single image tag, so `overture` runs a placeholder today and `score`
-changes one line.
+Layer 4 landed before layer 3 because it didn't depend on it: ArgoCD needed the
+cluster layer 2 produced, while `score` needed nothing but a repo. The seam
+between them is a single image reference, which `score` now writes.
 
 - [x] **1 · tuning** — VCN, gateway, routing, security list, subnet, A1 instance. Free-tier limits enforced in code.
 - [x] **2 · rehearsal** — seven idempotent roles: base prep, operator account, firewall, hardening, Docker, K3s, verification.
-- [ ] **3 · score** — next
+- [x] **3 · score** — a Go service with zero dependencies, and a pipeline that cross-compiles arm64 without emulation, attests provenance, and hands the digest to layer 4.
 - [x] **4 · conductor** — ArgoCD on the cluster, a root app-of-apps watching `conductor/manifests/`, self-healing and pruning.
-- [ ] **5 · backstage**
+- [ ] **5 · backstage** — next
 - [ ] **6 · metronome**
 - [ ] **7 · maestro**
 
@@ -141,6 +140,7 @@ runbook. Start at the beginning:
 
 **1 → [tuning](tuning/README.md)** — Terraform, OCI credentials, and the VM.
 **2 → [rehearsal](rehearsal/README.md)** — Ansible, hardening, and the K3s cluster.
+**3 → [score](score/README.md)** — the app, and CI that cross-compiles for ARM.
 **4 → [conductor](conductor/README.md)** — ArgoCD, and the GitOps loop.
 
 You'll need a free [Oracle Cloud](https://www.oracle.com/cloud/free/) account.

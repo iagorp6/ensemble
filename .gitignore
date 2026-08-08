@@ -77,6 +77,25 @@ oci_api_key*
 .oci/
 
 # ---------------------------------------------------------------------------
+# score/ — Go
+# ---------------------------------------------------------------------------
+
+# `go build` drops the compiled binary next to the source, named after the
+# module directory. It's ~6 MB of statically linked output that is regenerated
+# from source in seconds — and the whole point of `score` is that binaries come
+# from the pipeline, not from someone's laptop.
+score/overture
+score/overture.exe
+
+# Coverage profiles from `go test -coverprofile`.
+*.out
+coverage.*
+
+# Go workspace files are local-machine state, not project configuration.
+go.work
+go.work.sum
+
+# ---------------------------------------------------------------------------
 # maestro/ — Python
 # ---------------------------------------------------------------------------
 __pycache__/

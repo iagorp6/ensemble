@@ -1,0 +1,11 @@
+# Everything the build context doesn't need. A smaller context uploads faster
+# and, more importantly, makes it impossible to accidentally COPY something in.
+*
+!go.mod
+!go.sum
+!*.go
+
+# Tests are not copied into the image on purpose. They run in the `check` job of
+# the workflow, natively and in parallel with nothing else — which is both
+# faster and a better signal than running them inside a cross-compiled build.
+*_test.go

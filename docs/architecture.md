@@ -6,7 +6,7 @@ decisions get argued rather than stated.
 Written incrementally — each layer gets its section as it's built, so this file
 tracks the real state of the repo rather than an aspirational one.
 
-**Built so far:** layers 1 (`tuning`), 2 (`rehearsal`) and 4 (`conductor`).
+**Built so far:** layers 1 (`tuning`), 2 (`rehearsal`), 3 (`score`) and 4 (`conductor`).
 
 ---
 
@@ -437,18 +437,108 @@ crash-loop on this platform.
 
 ---
 
-## Layers 3, 5, 6, 7
+## Layer 3 — `score`
+
+Full documentation: [score/README.md](../score/README.md).
+
+### The pipeline
+
+```mermaid
+flowchart LR
+    push(["git push · score/**"]) --> check
+    check["<b>check</b><br/>gofmt · vet<br/>test -race"]
+    press["<b>press</b><br/>amd64 + arm64<br/>push GHCR · attest"]
+    cue["<b>cue</b><br/>write image@digest<br/>to conductor/manifests/"]
+    check --> press --> cue --> git[("commit to main")]
+    git -. "ArgoCD reconciles" .-> cluster["cluster"]
+    press --> ghcr[("GHCR")]
+    ghcr -. "kubelet pulls" .-> cluster
+```
+
+### Decisions worth defending
+
+**The workflow is at the repo root, not in `score/`.** GitHub Actions only reads
+`.github/workflows/` at the root of the default branch. A workflow nested inside
+a subdirectory is an ordinary text file that never runs, and nothing warns you —
+the Actions tab is simply empty. Only that one file has to live outside the
+layer.
+
+**Cross-compilation, not emulation — and the mistake is invisible.** The runners
+are x86_64 and the cluster is aarch64. `FROM --platform=$BUILDPLATFORM` pins the
+build stage to the *builder's* architecture so Go emits arm64 natively. Omit it
+and BuildKit runs the whole stage under QEMU: the build still *succeeds*, 10–20×
+slower. It isn't an error, it's a bill. The runtime stage executes nothing, so
+`docker/setup-qemu-action` is conspicuously absent from the workflow.
+
+**This is why the service is Go.** A Python or Node app needs its dependencies
+installed *for the target architecture*, which forces emulation or a cross-build
+toolchain. Go's standard library ships precompiled for every platform, so
+cross-compiling is two environment variables.
+
+**Zero dependencies, so no `go.sum`.** Nothing to audit, no module download in
+the container build, and the Prometheus exposition format had to be understood
+rather than imported. A real service would use `prometheus/client_golang`.
+
+**Three jobs, three permission sets, no cluster credentials anywhere.** `check`
+gets `contents: read`; `press` gets `packages: write` and an OIDC identity for
+provenance attestation; `cue` gets `contents: write` and nothing else. A
+`KUBECONFIG` secret here would mean anyone who can merge a workflow edit can run
+commands against production — and workflow files get edited far more casually
+than infrastructure.
+
+**Loop prevention is structural.** `cue` commits to `main`, which would normally
+retrigger the workflow, which would build and commit again, forever. The
+`paths:` filter lists only `score/**` and the workflow file; `conductor/**` is
+absent, so the bot's own commit cannot retrigger it. No `[skip ci]` marker for
+anyone to forget.
+
+**Opposite pinning rules for two artifacts.** The *app* image is referenced by
+digest in the deployment manifest, because a rollback must restore exact bytes.
+The *base* image is pinned by floating tag, because it should absorb security
+patches — a digest freeze without Renovate quietly becomes "unpatched forever".
+
+**Liveness and readiness answer different questions.** Failing readiness removes
+a pod from the Service; failing liveness kills the container. Pointing liveness
+at a dependency turns a thirty-second blip into every replica restarting at
+once. A test asserts liveness stays `200` while the pod is draining.
+
+**SIGTERM handling is the three-step dance, not "catch and exit".** Pod
+termination sends SIGTERM and removes the endpoint *concurrently*, at different
+speeds, so traffic still arrives after the signal. `overture` fails readiness
+first, pauses for that to propagate, then drains. Exiting immediately is the
+usual source of the 502s seen during every rolling update.
+
+**Metric cardinality is guarded by a test.** Labelling with the raw URL path
+turns every distinct URL into a time series, which is the standard way to take
+Prometheus down. The middleware records the route pattern, and a test fails if a
+raw path leaks into a label.
+
+### Verification
+
+Tests, `go vet` and `gofmt` run on Go 1.26 — 20 passing. Cross-compilation
+confirmed for both architectures, with the arm64 output verified as `ELF 64-bit
+LSB executable, ARM aarch64, statically linked` (5.4 MB). `actionlint` with
+shellcheck enabled and `hadolint` both returned zero findings.
+
+No image was actually built — the Docker daemon was not running — and the
+workflow has not executed on GitHub.
+
+---
+
+## Layers 5, 6, 7
 
 Not built yet. Each gets a section here as it lands.
 
 Known constraints carried forward:
 
-- **`score`** must build `linux/arm64`, and changes exactly one line in
-  `conductor/manifests/overture/deployment.yaml`. It gets registry credentials
-  and deliberately no cluster credentials.
-- **`backstage`** closes the gap layer 4 leaves open: secrets are currently the
-  one piece of cluster state not described in Git, because this repo is public.
+- **`backstage`** closes the gap layer 4 left open: secrets are the one piece of
+  cluster state not described in Git, because this repo is public. It has a
+  concrete first job now — a GHCR pull secret, since a new package is private by
+  default and the cluster pulls anonymously.
 - **`metronome`** has 12 GB shared with everything else, so retention and scrape
   intervals are configuration decisions rather than defaults. The inotify limits
-  are already raised for it, `overture` already carries the scrape annotations,
-  and it will arrive as an `Application` dropped into `conductor/manifests/`.
+  are already raised for it, `overture` already exposes a histogram and carries
+  the scrape annotations, and it will arrive as an `Application` dropped into
+  `conductor/manifests/`.
+- **`maestro`** consumes Alertmanager webhooks and needs no cluster access —
+  it's a consumer of alerts, not a participant.
