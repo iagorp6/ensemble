@@ -515,13 +515,21 @@ raw path leaks into a label.
 
 ### Verification
 
-Tests, `go vet` and `gofmt` run on Go 1.26 — 20 passing. Cross-compilation
-confirmed for both architectures, with the arm64 output verified as `ELF 64-bit
-LSB executable, ARM aarch64, statically linked` (5.4 MB). `actionlint` with
-shellcheck enabled and `hadolint` both returned zero findings.
+Locally: 20 tests, `go vet` and `gofmt` clean on Go 1.26; cross-compilation
+confirmed for both architectures with the arm64 output verified as `ELF 64-bit
+LSB executable, ARM aarch64, statically linked` (5.4 MB); `actionlint` with
+shellcheck and `hadolint` at zero findings.
 
-No image was actually built — the Docker daemon was not running — and the
-workflow has not executed on GitHub.
+On GitHub, run 31278891798 was green. The published artefact is a genuine
+multi-architecture OCI index carrying `linux/amd64` and `linux/arm64` plus
+provenance and SBOM attestations — both architectures produced by one x86
+runner with no QEMU step anywhere in the workflow, which is the
+cross-compilation argument demonstrated rather than asserted. `gh attestation
+verify` succeeds against the published digest.
+
+The `cue` job remains unverified: a manual dispatch skips it by design, so the
+`sed` rewriting `conductor/manifests/` and the commit-back have not executed.
+The next push touching `score/**` exercises them.
 
 ---
 
@@ -532,9 +540,12 @@ Not built yet. Each gets a section here as it lands.
 Known constraints carried forward:
 
 - **`backstage`** closes the gap layer 4 left open: secrets are the one piece of
-  cluster state not described in Git, because this repo is public. It has a
-  concrete first job now — a GHCR pull secret, since a new package is private by
-  default and the cluster pulls anonymously.
+  cluster state not described in Git, because this repo is public. Note it does
+  *not* need to solve a GHCR pull secret — a package published with
+  `GITHUB_TOKEN` inherits the repository's visibility, and this repo is public,
+  so the cluster pulls anonymously. Verified against the registry rather than
+  assumed. A private repo would need that secret, and it is the obvious worked
+  example even so.
 - **`metronome`** has 12 GB shared with everything else, so retention and scrape
   intervals are configuration decisions rather than defaults. The inotify limits
   are already raised for it, `overture` already exposes a histogram and carries

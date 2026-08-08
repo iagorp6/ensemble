@@ -240,31 +240,56 @@ is identical.
 
 ---
 
-## Before the first run
+## Image visibility
 
-The image is published to GHCR under your account. **A new package is private by
-default**, and the cluster pulls anonymously — so the first deploy will fail
-with `ImagePullBackOff` until you either:
+A package published from a workflow using `GITHUB_TOKEN` inherits the
+repository's visibility. This repo is public, so `ghcr.io/iagorp6/overture` is
+public too, and the cluster can pull it anonymously with no credential.
 
-- make the package public: GitHub → Packages → `overture` → Package settings →
-  Change visibility → Public, **or**
-- create a pull secret in the cluster — which is layer 5's (`backstage`)
-  territory, since that secret has to get into Git safely.
+Confirmed by pulling the manifest with an anonymous registry token — see below.
 
-Until `score` runs for the first time, `conductor` deploys
-`ghcr.io/stefanprodan/podinfo` as a placeholder. The first successful `cue`
-replaces it.
+If the repository were private, the package would be too, and the cluster would
+fail with `ImagePullBackOff` until given a pull secret. That secret would need
+to reach Git safely, which is `backstage`'s (layer 5) job.
+
+Until `score` runs, `conductor` deploys `ghcr.io/stefanprodan/podinfo` as a
+placeholder. The first successful `cue` replaces it.
 
 ---
 
 ## Verified
 
+Locally, before the first push:
+
 - `gofmt`, `go vet`, and **20 passing tests** on Go 1.26
 - Cross-compiled to `linux/amd64` and `linux/arm64`; the arm64 output confirmed
   as `ELF 64-bit LSB executable, ARM aarch64, statically linked`
-- `actionlint` **with shellcheck enabled**: 0 findings on the workflow
-- `hadolint`: 0 findings on the Dockerfile
+- `actionlint` **with shellcheck enabled**: 0 findings
+- `hadolint`: 0 findings
 
-**Not verified:** no container image was actually built — the Docker daemon
-wasn't running — and the workflow has not executed on GitHub. Lint-clean is not
-the same as green.
+Then on GitHub — [run 31278891798](https://github.com/iagorp6/ensemble/actions/runs/31278891798),
+green:
+
+- `check` and `press` both passed; `cue` correctly skipped on a manual dispatch
+- The published manifest is a real multi-architecture OCI index:
+
+  ```
+  mediaType: application/vnd.oci.image.index.v1+json
+    linux/amd64     sha256:c32e1cd54a7624f1ea0…
+    linux/arm64     sha256:f45377d22edd5759217…
+    unknown/unknown …  ← provenance + SBOM attestations
+  ```
+
+  Both architectures from one x86 runner, with no QEMU step in the workflow.
+  That's the cross-compilation claim above, proven rather than argued.
+
+- Tags published: `main`, `sha-9f7ab59`
+- Provenance verifies:
+
+  ```bash
+  gh attestation verify oci://ghcr.io/iagorp6/overture:sha-9f7ab59 --owner iagorp6
+  ```
+
+**Still not verified:** the `cue` job. A manual dispatch skips it by design, so
+the `sed` that rewrites `conductor/manifests/` and the commit-back have not run.
+The next push touching `score/**` exercises them.
