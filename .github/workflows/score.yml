@@ -180,7 +180,19 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=sha,prefix=sha-,format=short
+            # `priority` decides which tag becomes steps.meta.outputs.version,
+            # and that value is what `cue` writes into the deployment manifest
+            # and what gets compiled into the binary as its version string.
+            #
+            # metadata-action's defaults rank a branch ref (600) above a sha
+            # (100), so the first run produced `:main@sha256:…` — pinned
+            # correctly by digest, but with a human-readable half that says
+            # nothing about which commit it came from.
+            #
+            # 650 puts the sha above a branch while staying below semver (900),
+            # so a tagged release still identifies itself by version and every
+            # other build identifies itself by commit.
+            type=sha,prefix=sha-,format=short,priority=650
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
