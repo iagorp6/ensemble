@@ -14,6 +14,17 @@ alertmanager:
   enabled: true
 
   alertmanagerSpec:
+    # Mounts the SOPS-encrypted Secret from `backstage` at
+    # /etc/alertmanager/secrets/maestro-webhook/, so the token reaches
+    # Alertmanager as a FILE rather than as a string in this values file —
+    # which is public.
+    #
+    # The Secret is created by backstage's Application; if it is missing,
+    # Alertmanager still starts and the webhook simply fails to authenticate.
+    # Degrade, don't refuse — same reasoning as overture's `optional: true`.
+    secrets:
+      - maestro-webhook
+
     resources:
       requests:
         cpu: 25m
@@ -123,6 +134,13 @@ alertmanager:
           - url: "http://10.42.0.1:9099/alert"
             send_resolved: true
             max_alerts: 10
+            http_config:
+              authorization:
+                type: Bearer
+                # Read from the mounted Secret, never from this file. maestro
+                # compares it with hmac.compare_digest, so a wrong token fails
+                # in constant time.
+                credentials_file: /etc/alertmanager/secrets/maestro-webhook/token
 
     # Stop a resolved-and-refiring alert from notifying twice, and suppress
     # noise that a bigger failure already explains.

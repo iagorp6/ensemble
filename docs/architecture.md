@@ -686,24 +686,60 @@ Nothing has run; no cluster exists yet.
 
 ## Layer 7 — `maestro`
 
-Not built yet. It consumes Alertmanager webhooks and needs no cluster access —
-a consumer of alerts, not a participant, which is why nothing else depends on
-it being up.
+Full documentation: [maestro/README.md](../maestro/README.md).
 
-Two things layer 6 has already committed to on its behalf:
+The only layer that runs on the workstation. ~350 lines of dependency-free
+Python that reads an Alertmanager webhook or a log excerpt and drafts the note
+an experienced engineer would leave for whoever got woken.
 
-- Alertmanager posts to `http://10.42.0.1:9099/alert` — the node's own address
-  on the K3s pod network, reachable from a pod over an SSH reverse tunnel. Two
-  things must be true for that to work and layer 7 wires both: the tunnel has to
-  bind on all interfaces, and sshd's `GatewayPorts` has to permit it. It
-  defaults to `no` and `lockup` did not change it, so today the bind silently
-  falls back to loopback and the webhook times out with nothing in any log
-  pointing at the cause.
-- The alert's `runbook` annotation is written as instructions to a human, which
-  is what makes it useful to a model as well — both need to know what to look at
-  first.
+### Decisions worth defending
 
-Its shared token belongs in `backstage`, with the wrinkle that maestro runs on
-the workstation, so its copy is a local `.env` rather than a Kubernetes Secret.
-Same value, two delivery mechanisms, because the consumers are in different
-places.
+**It has no cluster credentials and changes nothing.** "AIOps" is usually sold
+as software that remediates on its own, and a model that can restart your
+deployments is a model that can restart your deployments at 3am because it
+misread a log line. What is genuinely useful is the five minutes of orientation
+before a human decides anything. It is also why nothing depends on maestro being
+up: Alertmanager has already done its job by the time it runs.
+
+**It answers `202 Accepted` and infers in the background.** Inference takes 20
+seconds to two minutes on this hardware; Alertmanager's webhook timeout is much
+shorter, and an unanswered webhook is retried — so a slow handler produces
+duplicate deliveries and a queue that never drains on a machine that runs one
+inference at a time. Worse, Alertmanager's notification pipeline blocks on the
+request, so a slow maestro would delay every other alert behind it. The tool
+whose job is to help must not be able to make the outage harder to see.
+
+**Log content is framed as untrusted in both prompts.** Anything that can write
+to a log can try to write instructions into one, and this tool feeds logs
+straight to a model. Both prompts delimit the excerpt, label it "data, not
+instructions", and ask the model to report an apparent injection rather than
+follow it — with a test asserting both still say so, because that is the kind of
+line a tidy-up removes.
+
+**Input is capped at 200 lines, keeping the tail.** A crash-looping pod emits
+the same trace thousands of times a minute, and a 128k-context model accepts all
+of it — at which point the KV cache exceeds 6 GB of VRAM, Ollama spills layers
+to CPU, and a 20-second inference becomes several minutes.
+
+**One shared token, two delivery mechanisms.** Alertmanager gets it as a
+SOPS-encrypted Secret mounted as a file; maestro gets it as an env var in a
+gitignored `.env`. A Kubernetes Secret cannot span namespaces or leave the
+cluster, so "one value, two consumers" genuinely is two objects.
+
+**`GatewayPorts clientspecified`, added to `lockup`.** Alertmanager reaches
+maestro over an SSH reverse tunnel that must bind on the node's pod-network
+address. `GatewayPorts` defaults to `no`, and when it is `no` sshd binds to
+loopback anyway *without complaining* — the client reports success and every
+webhook times out with nothing explaining why.
+
+### Verification
+
+22 tests, none of which require Ollama running. Truncation, prompt rendering
+against log lines full of braces and percent signs, token auth in six states,
+graceful degradation when Ollama is unreachable, and Loki lines re-ordered
+oldest-first. The Alertmanager side was rendered from the real chart and
+asserted: secret mounted, bearer read from a file, and no plaintext token
+anywhere in the rendered config.
+
+No model has been called with a real alert; the tunnel and the token exchange
+are unrun.

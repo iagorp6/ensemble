@@ -18,7 +18,7 @@ Each of those is a layer, and the mapping is exact:
 | 4 | [**conductor**](conductor/) | ArgoCD | GitOps — watches the manifests and syncs the cluster, unattended |
 | 5 | [**backstage**](backstage/) | SOPS + age | Encrypted secrets, safe to commit to Git |
 | 6 | [**metronome**](metronome/) | Prometheus · Grafana · Loki · Alertmanager | Observability |
-| 7 | **maestro** | Ollama (local) | AIOps — reads logs and alerts, drafts plain-English cause notes |
+| 7 | [**maestro**](maestro/) | Ollama (local) | AIOps — reads logs and alerts, drafts plain-English cause notes |
 
 ## Build status
 
@@ -35,7 +35,38 @@ between them is a single image reference, which `score` now writes.
 - [x] **4 · conductor** — ArgoCD on the cluster, a root app-of-apps watching `conductor/manifests/`, self-healing and pruning.
 - [x] **5 · backstage** — SOPS + age secrets committed to this public repo, decrypted by ArgoCD at sync, and actually consumed by the app.
 - [x] **6 · metronome** — Prometheus, Grafana, Loki, Alertmanager and Alloy, cut down to fit 420m CPU and 1.3 GB, with one alert that means something.
-- [ ] **7 · maestro** — next
+- [x] **7 · maestro** — a local model that reads an alert and drafts the note, with no cluster credentials and nothing depending on it being up.
+
+### Status
+
+All seven layers are written, reviewed and version-controlled. **The cluster
+they target has not been provisioned yet**, and I'd rather say that plainly than
+let a row of ticks imply otherwise.
+
+What has actually run:
+
+- **`score` is green on GitHub** — [the pipeline
+  executes](https://github.com/iagorp6/ensemble/actions), tests pass, and it
+  publishes a real multi-architecture image to GHCR (`linux/amd64` +
+  `linux/arm64` from one x86 runner, no QEMU) with a verifiable provenance
+  attestation. `cue` has written three image digests back into
+  `conductor/manifests/` on its own.
+- **`maestro`'s 22 tests pass**, and **`score`'s 26**.
+- **`backstage` does a real SOPS round trip** — encrypt, decrypt, denied
+  without the key, MAC failure on a tampered byte.
+
+What has *not*:
+
+- No OCI instance exists, so `tuning` and `rehearsal` are unrun.
+- ArgoCD has never synced, so `conductor`, `backstage`'s decrypt-at-sync path
+  and all of `metronome` are verified only by rendering the real charts and
+  asserting against the output — schema-valid and resource-budgeted, not
+  observed working.
+- No model has been called with a real alert.
+
+Every layer's README ends with what was verified and what wasn't, in those
+terms. Lint-clean and schema-valid is not the same as green, and a portfolio
+repo that blurs the two is worth less than one that doesn't.
 
 ---
 
@@ -145,6 +176,7 @@ runbook. Start at the beginning:
 **4 → [conductor](conductor/README.md)** — ArgoCD, and the GitOps loop.
 **5 → [backstage](backstage/README.md)** — SOPS + age, and secrets in a public repo.
 **6 → [metronome](metronome/README.md)** — observability, sized to what's left.
+**7 → [maestro](maestro/README.md)** — a local model that reads the alerts.
 
 You'll need a free [Oracle Cloud](https://www.oracle.com/cloud/free/) account.
 Everything in this repo is designed to stay inside the Always Free tier, and

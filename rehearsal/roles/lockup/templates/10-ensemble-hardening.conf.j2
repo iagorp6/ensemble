@@ -44,6 +44,23 @@ X11Forwarding no
 # exposing 6443 publicly.
 AllowTcpForwarding {{ 'yes' if lockup_ssh_allow_tcp_forwarding else 'no' }}
 
+# Required by `maestro` (layer 7), and a genuinely obscure failure if missed.
+#
+# Alertmanager runs in the cluster and posts to maestro on the workstation over
+# a REVERSE tunnel (`ssh -R`). For a pod to reach it, the tunnel has to listen
+# on the node's pod-network address rather than only on the node's loopback:
+#
+#     ssh -R 0.0.0.0:9099:localhost:9099 {{ crew_user }}@<node>
+#
+# GatewayPorts defaults to `no`, and when it is `no` sshd SILENTLY binds to
+# loopback anyway. The ssh client reports success, the tunnel appears to be up,
+# and every webhook times out with nothing in any log explaining why.
+#
+# `clientspecified` rather than `yes`: it permits the bind address the client
+# asks for instead of forcing every remote forward onto all interfaces, so a
+# tunnel that wants to stay on loopback still can.
+GatewayPorts {{ lockup_ssh_gateway_ports }}
+
 # An explicit allow-list. Anything not named here cannot authenticate at all,
 # regardless of keys or group membership — including any service account a
 # package installs later with a shell by accident.

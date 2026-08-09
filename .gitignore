@@ -102,7 +102,16 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Holds MAESTRO_TOKEN — the same value backstage encrypts for Alertmanager.
+# The committed template is maestro/.env.example.
 .env
+maestro/.env
+
+# The notes maestro writes. They quote production logs verbatim, which is
+# exactly the content this platform is arranged not to publish.
+maestro/notes.md
+notes.md
 
 # ---------------------------------------------------------------------------
 # Editor and OS noise

@@ -18,6 +18,12 @@ lockup_ssh_client_alive_count_max: 2
 # a bigger exposure.
 lockup_ssh_allow_tcp_forwarding: true
 
+# Lets a reverse tunnel bind somewhere a pod can reach, which is how
+# Alertmanager reaches `maestro` on the workstation. `clientspecified` permits
+# the address the client asks for rather than forcing every remote forward onto
+# all interfaces. Set to "no" to disable maestro's webhook path entirely.
+lockup_ssh_gateway_ports: clientspecified
+
 lockup_unattended_upgrades: true
 lockup_unattended_reboot: false
 lockup_unattended_reboot_time: "03:00"
