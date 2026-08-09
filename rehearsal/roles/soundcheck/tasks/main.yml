@@ -76,7 +76,7 @@
   register: soundcheck_ufw
   changed_when: false
 
-- name: ufw is active with the policy Kubernetes needs
+- name: Firewall is active with the policy Kubernetes needs
   ansible.builtin.assert:
     that:
       - "'Status: active' in soundcheck_ufw.stdout"
@@ -126,7 +126,7 @@
   register: soundcheck_sshd
   changed_when: false
 
-- name: sshd is hardened in its effective configuration
+- name: SSH daemon is hardened in its effective configuration
   ansible.builtin.assert:
     that:
       - "'passwordauthentication no' in soundcheck_sshd.stdout | lower"
@@ -258,7 +258,8 @@
       - "host           : {{ inventory_hostname }} ({{ ansible_host }})"
       - "os             : {{ ansible_distribution }} {{ ansible_distribution_version }} / {{ ansible_architecture }}"
       - "memory         : {{ ansible_memtotal_mb }} MB    cores: {{ ansible_processor_vcpus }}"
-      - "root fs        : {{ (soundcheck_storage.stdout.split()[0] | float / 1024 / 1024 / 1024) | round(1) }} GB of {{ (soundcheck_storage.stdout.split()[1] | float / 1024 / 1024 / 1024) | round(1) }} GB device"
+      - "root fs        : {{ (soundcheck_storage.stdout.split()[0] | float / 1073741824) | round(1) }} GB"
+      - "  of device    : {{ (soundcheck_storage.stdout.split()[1] | float / 1073741824) | round(1) }} GB"
       - "swap           : {{ ansible_swaptotal_mb }} MB"
       - "firewall       : ufw active, Oracle REJECT rules removed"
       - "sshd           : keys only, no root login"

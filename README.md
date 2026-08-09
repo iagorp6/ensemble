@@ -54,6 +54,13 @@ What has actually run:
 - **`maestro`'s 22 tests pass**, and **`score`'s 26**.
 - **`backstage` does a real SOPS round trip** — encrypt, decrypt, denied
   without the key, MAC failure on a tampered byte.
+- **[`soundcheck`](.github/workflows/soundcheck.yml) re-checks all of it on
+  every push and pull request** — `terraform validate` against the real OCI
+  provider, `ansible-lint` at the `production` profile, `kubeconform` against
+  real CRD schemas, every Helm chart rendered with this repo's values, and **41
+  assertions** that the decisions in the docs still hold. Including that no
+  plaintext token appears in a render and that `.gitignore` still catches every
+  credential path.
 
 What has *not*:
 
@@ -277,17 +284,15 @@ not adding an eighth tool mid-build is part of the exercise.
   starts paying for itself.
 - **A second node**, to make `conductor` schedule across a real cluster instead
   of a single-node one. Blocked on the free tier, not on interest.
-- **A repo-wide validation workflow.** Every layer's README ends with what was
-  verified — `terraform validate`, `actionlint` with shellcheck, `hadolint`,
-  `kubeconform` against real CRD schemas, chart renders asserted against. All of
-  that was run by hand, once. A second GitHub Actions workflow running it on
-  every pull request would turn "I checked" into "it is checked", and it needs
-  no new tool — only the one layer 3 already uses. This is the first thing I'd
-  build next, and the only reason it isn't here is the no-scope-creep rule.
-
 The rule I set myself was to note these rather than build them. Keeping to it
 while the list grew was harder than adding any single item on it would have
 been, which is roughly the point.
+
+One item did graduate off this list:
+[**`soundcheck`**](.github/workflows/soundcheck.yml), a repo-wide validation
+workflow. It earned an exception because it introduces no new tool — it runs the
+checks each layer already documents, using the GitHub Actions that layer 3
+already uses.
 
 ## Related
 

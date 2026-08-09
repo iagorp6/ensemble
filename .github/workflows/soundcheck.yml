@@ -1,0 +1,284 @@
+# =============================================================================
+# soundcheck — validate every layer, on every change
+# =============================================================================
+#
+# Named after `rehearsal`'s soundcheck role, and for the same reason: it asserts
+# and changes nothing. That one checks a node; this one checks the repository.
+#
+# WHY THIS EXISTS
+#
+# Every layer's README ends with a list of what was verified — `terraform
+# validate`, `actionlint` with shellcheck, `hadolint`, `kubeconform` against
+# real CRD schemas, Helm charts rendered and asserted against, `ansible-lint` at
+# the production profile.
+#
+# All of that was run by hand, once, by me. Which means every one of those
+# claims decays from the moment it is written. This workflow is the difference
+# between "I checked" and "it is checked", and it needs no new tool — only the
+# one layer 3 already uses.
+#
+# It runs on pull requests AND on pushes to main, including the commits `score`
+# writes back to conductor/manifests/ on its own. That last case is deliberate:
+# a bot rewriting a manifest is exactly when you want the manifest re-validated.
+#
+# NO PATH FILTERS, unlike score.yml. Every job here is fast, and the whole point
+# is that a change anywhere gets checked against everything — a values file
+# edited in metronome/ can break a manifest rendered in conductor/.
+# =============================================================================
+
+name: soundcheck
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soundcheck-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned so a green run stays reproducible. An unpinned linter turns a passing
+  # branch red on a day nobody changed anything, which is how teams learn to
+  # rerun CI until it passes.
+  TERRAFORM_VERSION: "1.15.8"
+  HELM_VERSION: "v4.2.3"
+  KUBECONFORM_VERSION: "v0.8.0"
+  ACTIONLINT_VERSION: "1.7.12"
+  HADOLINT_VERSION: "v2.15.1"
+  ANSIBLE_LINT_VERSION: "26.6.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Layer 1
+  # ---------------------------------------------------------------------------
+  tuning:
+    name: "tuning: terraform"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Check formatting
+        working-directory: tuning
+        run: terraform fmt -check -recursive -diff
+
+      # -backend=false skips backend initialisation, so this needs no OCI
+      # credentials and no state — it downloads the provider and checks the
+      # config against its real schema. That is what catches an attribute that
+      # does not exist, which is the class of error no amount of reading finds.
+      - name: Initialise (no backend, no credentials)
+        working-directory: tuning
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        working-directory: tuning
+        run: terraform validate -no-color
+
+  # ---------------------------------------------------------------------------
+  # Layer 2
+  # ---------------------------------------------------------------------------
+  rehearsal:
+    name: "rehearsal: ansible"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install ansible-lint
+        run: pip install --quiet "ansible-lint==${ANSIBLE_LINT_VERSION}"
+
+      # ansible-lint resolves module names against installed collections. Without
+      # these it reports every community.general and ansible.posix task as an
+      # unknown module — a wall of false positives that trains you to ignore it.
+      - name: Install the collections the layer declares
+        working-directory: rehearsal
+        run: ansible-galaxy collection install -r requirements.yml
+
+      # Runs at the `production` profile, configured in rehearsal/.ansible-lint
+      # along with a written justification for the single rule that is skipped.
+      - name: Lint
+        working-directory: rehearsal
+        run: ansible-lint --nocolor playbook.yml
+
+      # A different check from linting: this one parses the playbook and every
+      # role the way Ansible actually would, which catches a broken include or a
+      # role that does not exist.
+      - name: Syntax check
+        working-directory: rehearsal
+        run: ansible-playbook --syntax-check -i inventory.example.ini playbook.yml
+
+  # ---------------------------------------------------------------------------
+  # Layer 7 (layer 3's Go tests live in score.yml)
+  # ---------------------------------------------------------------------------
+  maestro:
+    name: "maestro: python"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # No dependencies to install — maestro is standard library only, which is
+      # why this job is four lines and needs no lockfile.
+      - name: Test
+        working-directory: maestro
+        run: python -m unittest discover -v
+
+      - name: Check triage.py is executable
+        run: test -x maestro/triage.py
+
+  # ---------------------------------------------------------------------------
+  # Layers 4, 5, 6 — the Kubernetes side
+  # ---------------------------------------------------------------------------
+  manifests:
+    name: "conductor + metronome: manifests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      # Validates against real Kubernetes OpenAPI schemas, plus the CRD catalog
+      # for ArgoCD's Application and the Prometheus Operator's ServiceMonitor and
+      # PrometheusRule. Without the second schema source those three are skipped
+      # silently, which is the difference between "valid" and "not checked".
+      - name: Validate committed manifests
+        run: |
+          kubeconform -strict -summary \
+            -ignore-filename-pattern 'values\.yaml' \
+            -ignore-filename-pattern 'kustomization\.yaml' \
+            -ignore-filename-pattern 'secret-generator\.yaml' \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            conductor/ metronome/rules/ backstage/
+
+      - name: Add chart repositories
+        run: |
+          helm repo add argo https://argoproj.github.io/argo-helm
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo update
+
+      # The step that catches the most, and the reason it is worth having a
+      # workflow at all: a values file can be perfectly valid YAML and still be
+      # wrong, either by setting a key the chart does not have (Helm silently
+      # ignores it) or by producing output Kubernetes will reject. Rendering and
+      # then validating the render catches both.
+      - name: Render every chart with this repo's values, and validate the output
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/rendered
+
+          helm template argocd argo/argo-cd --version 10.3.0 -n argocd \
+            --values conductor/bootstrap/values.yaml > /tmp/rendered/argocd.yaml
+
+          helm template metronome prometheus-community/kube-prometheus-stack --version 88.2.0 -n metronome \
+            --values metronome/prometheus/values.yaml \
+            --values metronome/grafana/values.yaml \
+            --values metronome/alertmanager/values.yaml > /tmp/rendered/kps.yaml
+
+          helm template loki grafana/loki --version 7.2.0 -n metronome \
+            --values metronome/loki/values.yaml > /tmp/rendered/loki.yaml
+
+          helm template alloy grafana/alloy --version 1.11.1 -n metronome \
+            --values metronome/alloy/values.yaml > /tmp/rendered/alloy.yaml
+
+          for f in /tmp/rendered/*.yaml; do echo "--- $f"; done
+          # -ignore-missing-schemas because the rendered output contains the
+          # charts' own CRDs, which by definition have no schema to check yet.
+          kubeconform -strict -summary -ignore-missing-schemas \
+            -schema-location default /tmp/rendered/
+
+      # The properties the READMEs claim, asserted rather than described. If a
+      # future values change quietly re-enables Dex, or drops Prometheus's
+      # retentionSize, or re-enables the K3s control-plane scrape targets that do
+      # not exist, this is what says so.
+      - name: Assert the sizing and K3s decisions still hold
+        run: python3 .github/scripts/assert_render.py
+
+  # ---------------------------------------------------------------------------
+  # Everything shell-shaped, across all layers
+  # ---------------------------------------------------------------------------
+  scripts:
+    name: "all layers: shell + dockerfile + workflows"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install actionlint and hadolint
+        run: |
+          curl -sSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin actionlint
+          curl -sSL -o /usr/local/bin/hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-Linux-x86_64"
+          chmod +x /usr/local/bin/hadolint
+
+      # shellcheck is preinstalled on GitHub runners, and actionlint uses it
+      # automatically to check the `run:` blocks inside every workflow — which
+      # is where the shell in this repo is most likely to be wrong.
+      - name: Lint workflows
+        run: actionlint -color
+
+      - name: Lint the Dockerfile
+        run: hadolint score/Dockerfile
+
+      - name: Lint every shell script
+        run: |
+          set -euo pipefail
+          mapfile -t scripts < <(git ls-files '*.sh')
+          printf 'checking %d scripts\n' "${#scripts[@]}"
+          shellcheck --severity=style "${scripts[@]}"
+
+      # The rule the whole platform rests on: nothing that decrypts, authorises
+      # or identifies may be committed. .gitignore is the mechanism, so its
+      # correctness is worth testing rather than assuming.
+      - name: Assert nothing secret can be committed
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in backstage/age.key maestro/.env maestro/notes.md \
+                   tuning/terraform.tfvars tuning/terraform.tfstate \
+                   rehearsal/inventory.ini rehearsal/kubeconfig.podium; do
+            if git check-ignore -q "$f"; then
+              echo "  ignored  $f"
+            else
+              echo "  TRACKED  $f  <-- must be gitignored"; fail=1
+            fi
+          done
+          for f in backstage/secrets.example.yaml tuning/terraform.tfvars.example \
+                   rehearsal/inventory.example.ini maestro/.env.example; do
+            if git check-ignore -q "$f"; then
+              echo "  IGNORED  $f  <-- template must stay committed"; fail=1
+            else
+              echo "  tracked  $f"
+            fi
+          done
+          echo "--- scanning tracked files for key material ---"
+          if git grep -nE 'AGE-SECRET-KEY-1[0-9A-Z]{20,}|BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY' -- . ; then
+            echo "  private key material found in a tracked file"; fail=1
+          else
+            echo "  none"
+          fi
+          exit $fail

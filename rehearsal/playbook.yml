@@ -53,7 +53,7 @@
 #   soundcheck  last, and it only asserts. If it fails, something above lied.
 # =============================================================================
 
-- name: rehearsal — configure the ensemble node
+- name: Rehearsal — configure the ensemble node
   hosts: ensemble
 
   # Nearly every task here writes to /etc or manages a service, so escalation is
