@@ -56,7 +56,7 @@ The three patterns used here:
 | Check-then-act | `doorman` removing Oracle's iptables rules | `iptables -C` tests for the rule; the delete is guarded on that result. A bare `iptables -D` errors on the second run |
 | Parse the tool's own output | `warmup` growing the filesystem | `growpart` prints `NOCHANGE` and exits non-zero when already maximal; treating that specific failure as success is what makes it repeatable |
 
-The subtlest case is in `orchestra`. Pulling the kubeconfig back to the laptop
+The subtlest case is in `orchestra`. Pulling the kubeconfig back to the workstation
 looks like a job for Ansible's `fetch` module — but `fetch` compares the remote
 file to the local one, and rewriting the server address afterwards makes them
 differ *permanently*, so it re-downloads and re-rewrites on every run. Two
@@ -205,7 +205,7 @@ value makes `orchestra` perform an in-place upgrade on the next run.
 
 Without the public IP as a Subject Alternative Name, the certificate K3s
 generates is valid for `127.0.0.1` and the private IP only. `kubectl` from a
-laptop connects, receives a certificate that doesn't match the address it
+workstation connects, receives a certificate that doesn't match the address it
 dialled, and fails verification. It looks like a kubeconfig problem and isn't.
 
 The value comes from `node_public_ip` in the inventory — which layer 1
@@ -282,7 +282,7 @@ detector.
 
 ## What this hands to `conductor`
 
-A running K3s cluster, and a kubeconfig on your laptop with the server address
+A running K3s cluster, and a kubeconfig on your workstation with the server address
 already rewritten to the node's public IP:
 
 ```bash

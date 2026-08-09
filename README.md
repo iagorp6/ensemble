@@ -63,7 +63,7 @@ having working code.
 
 ```mermaid
 flowchart LR
-    subgraph laptop["My laptop — 16 GB, WSL2, RTX 4050"]
+    subgraph local["Workstation — 16 GB RAM · WSL2 8 GB · 6 GB VRAM"]
         dev["git push"]
         maestro["<b>maestro</b><br/>Ollama · log triage"]
     end
@@ -101,24 +101,25 @@ Full walkthrough in [docs/architecture.md](docs/architecture.md).
 
 ### The hosting split, and why it's deliberate
 
-The cluster runs in Oracle Cloud, CI runs on GitHub, and the AI layer runs on
-my laptop. Three places, chosen rather than settled for.
+The cluster runs in Oracle Cloud, CI runs on GitHub, and the AI layer runs
+locally. Three places, chosen rather than settled for.
 
-I'm on a 16 GB laptop with WSL2 capped at 8 GB and 8 threads. K3s plus ArgoCD
-plus a full Prometheus/Grafana/Loki stack would fit in that, barely, and would
-leave nothing for an editor, a browser and a language model. The obvious
-response is to scale the project down — drop Loki, skip ArgoCD, run three
-layers instead of seven. I'd rather place each layer where it actually belongs:
+The workstation this is operated from has **16 GB RAM, 8 GB of it available to
+WSL2, and 6 GB of VRAM**. K3s plus ArgoCD plus a full Prometheus/Grafana/Loki
+stack would fit in that, barely, and would leave nothing for an editor, a
+browser and a language model. The obvious response is to scale the project down
+— drop Loki, skip ArgoCD, run three layers instead of seven. I'd rather place
+each layer where it actually belongs:
 
 - **The cluster** (`tuning` → `rehearsal` → K3s → `conductor` → `metronome`)
   runs on an **Oracle Cloud Always Free** VM. It's free, it's always on, which
   is the only honest way to demo GitOps and alerting, and it doubles as OCI
   practice while I'm mid-certification on OCI Foundations Associate.
-- **`score`** runs on **GitHub-hosted runners**. CI that only runs when my
-  laptop is open isn't CI, and it costs nothing either way.
+- **`score`** runs on **GitHub-hosted runners**. CI that only runs while a
+  workstation is powered on isn't CI, and it costs nothing either way.
 - **`maestro`** runs **locally**. It's the one component that genuinely wants
-  the RTX 4050's VRAM, and log triage is exactly the workload where sending
-  data to a hosted model is the wrong instinct.
+  the 6 GB of VRAM, and log triage is exactly the workload where sending data
+  to a hosted model is the wrong instinct.
 
 Deciding where each component should live given real constraints is most of
 what platform work actually is. Documenting the reasoning is the part that

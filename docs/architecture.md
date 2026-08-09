@@ -41,7 +41,7 @@ is `rehearsal`'s, where it's idempotent and can be re-run a hundred times.
 
 ```mermaid
 flowchart LR
-    subgraph laptop["My laptop — 16 GB, WSL2, RTX 4050"]
+    subgraph local["Workstation — 16 GB RAM · WSL2 8 GB · 6 GB VRAM"]
         dev["git push"]
         maestro["<b>maestro</b><br/>Ollama · log triage"]
     end
@@ -131,17 +131,17 @@ line in a workflow file.
 Three execution environments, chosen rather than settled for.
 
 ```
-laptop  (16 GB, WSL2 capped at 8 GB / 8 threads, RTX 4050)   →  maestro
-GitHub  (hosted runners)                                     →  score
-OCI     (Always Free ARM VM, 2 OCPU / 12 GB)                 →  everything else
+workstation  (16 GB RAM · WSL2 8 GB · 6 GB VRAM)         →  maestro
+GitHub       (hosted runners)                            →  score
+OCI          (Always Free ARM VM, 2 OCPU / 12 GB)        →  everything else
 ```
 
 **Why not all local?** K3s + ArgoCD + kube-prometheus-stack + Loki fits in 8 GB
 if nothing else is running. Nothing else running is not a realistic condition
 on the machine I also write code on. More importantly, a cluster that's only up
-while my laptop is open can't demonstrate the two things this project is
-actually about: GitOps reconciling a drift I introduced yesterday, and an alert
-firing at 3am.
+while a workstation is powered on can't demonstrate the two things this project
+is actually about: GitOps reconciling a drift I introduced yesterday, and an
+alert firing at 3am.
 
 **Why not all cloud?** `maestro` wants a GPU. The Always Free tier has no GPU,
 and paying for one would defeat the point. Running the model locally is also
@@ -149,8 +149,8 @@ the better answer on its own merits — log excerpts are exactly the kind of dat
 that shouldn't leave the machine by default, and "we run inference on our own
 hardware because of data locality" is a real position, not a rationalisation.
 
-**Why GitHub for CI?** Free for public repos, and CI that requires my laptop to
-be open isn't CI.
+**Why GitHub for CI?** Free for public repos, and CI that requires a
+workstation to be powered on isn't CI.
 
 The genuine cost of this split is that there's no single `make up`. Bringing the
 whole platform from cold takes three tools in three places. That's a fair trade
@@ -320,7 +320,7 @@ it's behind a variable so it can be dropped when `metronome` makes memory tight.
 
 **The K3s version is pinned and `--tls-san` carries the public IP.** Piping
 `get.k3s.io` into a shell installs whatever is newest that day. And without the
-public IP in the API certificate's SANs, kubectl from a laptop fails
+public IP in the API certificate's SANs, kubectl from a workstation fails
 verification against an address the certificate doesn't cover — which looks like
 a kubeconfig problem and isn't. The IP comes from the inventory Terraform
 generated, which is where layer 1's outputs stop being decorative.
@@ -373,13 +373,13 @@ flowchart LR
         app["overture<br/>namespace: overture"]
     end
 
-    laptop["laptop"]
+    workstation["workstation"]
 
     git -. "polls, every 3 min" .-> repo
     repo --> ctrl
     ctrl -- "apply / prune / revert drift" --> app
     api <--> ctrl
-    laptop -. "port-forward only" .-> api
+    workstation -. "port-forward only" .-> api
 ```
 
 Every arrow touching the cluster points inward and is initiated from inside.
@@ -391,7 +391,7 @@ changing this cluster exists anywhere outside it once bootstrap is done.
 **The bootstrap seam is admitted, not hidden.** Something has to install the
 thing that watches Git, and that something cannot itself be GitOps. Every GitOps
 setup has this seam; most bury it in a README bullet. Here it's one idempotent
-script, `bootstrap/install.sh`, and the moment it finishes the laptop's
+script, `bootstrap/install.sh`, and the moment it finishes the workstation's
 kubeconfig stops being load-bearing.
 
 **`selfHeal` and `prune` are what make it GitOps rather than a deploy button.**
@@ -631,6 +631,7 @@ Not built yet.
   `conductor/manifests/` — the same way `backstage` just did.
 - **`maestro`** consumes Alertmanager webhooks and needs no cluster access —
   a consumer of alerts, not a participant. The shared token Alertmanager
-  presents to it belongs in `backstage`, with the wrinkle that maestro runs on a
-  laptop, so its copy is a local `.env` rather than a Kubernetes Secret. Same
+  presents to it belongs in `backstage`, with the wrinkle that maestro runs on
+  the workstation, so its copy is a local `.env` rather than a Kubernetes
+  Secret. Same
   value, two delivery mechanisms, because the consumers are in different places.

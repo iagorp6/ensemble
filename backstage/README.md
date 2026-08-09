@@ -114,7 +114,7 @@ sudo install -m 0755 /tmp/sops /usr/local/bin/sops
 sudo apt install -y age
 ```
 
-(Use `linux.amd64` on an x86 laptop. WSL on most machines is amd64.)
+(Use `linux.amd64` on an x86 machine. WSL on most machines is amd64.)
 
 ### 2. Generate your own key
 

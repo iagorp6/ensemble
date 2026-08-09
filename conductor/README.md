@@ -86,14 +86,14 @@ flowchart LR
         end
     end
 
-    laptop["laptop<br/>kubectl port-forward"]
+    workstation["workstation<br/>kubectl port-forward"]
 
     git -. "polls every 3 min" .-> repo
     repo --> ctrl
     ctrl -- "applies / prunes / reverts" --> app
     ctrl <--> redis
     api <--> ctrl
-    laptop -. "tunnel, no public ingress" .-> api
+    workstation -. "tunnel, no public ingress" .-> api
 ```
 
 Note the direction of every arrow touching the cluster: **inward, initiated
