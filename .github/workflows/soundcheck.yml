@@ -168,11 +168,33 @@ jobs:
         run: |
           kubeconform -strict -summary \
             -ignore-filename-pattern 'values\.yaml' \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            conductor/ metronome/rules/
+
+      # backstage's encrypted files get their own pass, WITHOUT -strict.
+      #
+      # SOPS appends a top-level `sops:` block carrying the encrypted data key
+      # and the MAC. That is not part of the Secret schema, so strict mode
+      # rejects it as an additional property — correctly. ksops strips it during
+      # decryption, so what Kubernetes actually receives is a plain Secret.
+      #
+      # Validating them non-strictly rather than skipping them is the point of
+      # choosing SOPS in the first place: because it encrypts values and leaves
+      # structure alone, an encrypted secret is still checkably a Secret, with
+      # the right apiVersion, kind and metadata. A tool that produced an opaque
+      # blob could not be checked at all.
+      #
+      # .sops.yaml, kustomization.yaml and secret-generator.yaml are excluded
+      # because they are SOPS and Kustomize config, not Kubernetes objects.
+      - name: Validate encrypted secrets are still well-formed Secrets
+        run: |
+          kubeconform -summary \
+            -ignore-filename-pattern '\.sops\.yaml' \
             -ignore-filename-pattern 'kustomization\.yaml' \
             -ignore-filename-pattern 'secret-generator\.yaml' \
             -schema-location default \
-            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-            conductor/ metronome/rules/ backstage/
+            backstage/
 
       - name: Add chart repositories
         run: |
