@@ -1,0 +1,97 @@
+# =============================================================================
+# metronome / grafana / values.yaml
+# =============================================================================
+#
+# A second values file for the SAME chart. ArgoCD merges the files listed in the
+# Application's `valueFiles` in order, so each directory here owns its slice of
+# kube-prometheus-stack rather than one 400-line file owning everything.
+#
+# Grafana, Alertmanager and Prometheus are separate concerns that happen to ship
+# in one chart; keeping them in separate files means a change to alert routing
+# has a diff that touches only alert routing.
+# =============================================================================
+
+grafana:
+  enabled: true
+
+  # The admin password. NOT a secret worth protecting with `backstage` — Grafana
+  # here is read-only dashboards over data that is already in the cluster, and
+  # it has no ingress, so reaching it at all requires a port-forward, which
+  # requires cluster access, which is strictly more privilege than this password
+  # grants.
+  #
+  # Naming that reasoning matters more than the password does. "Encrypt every
+  # string that looks like a credential" is how a secrets workflow becomes
+  # ceremony nobody follows. The rule worth keeping is: encrypt what would let
+  # someone do something they otherwise could not.
+  adminPassword: ensemble
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+  # No persistence. Everything Grafana knows — datasources, dashboards, the org
+  # — is provisioned from files on startup, so a restart rebuilds it in seconds.
+  # A PVC would only preserve state created by clicking, and state created by
+  # clicking is exactly what this platform is arranged to avoid.
+  persistence:
+    enabled: false
+
+  # No ingress, same reasoning as ArgoCD: reach it through a tunnel.
+  #   kubectl port-forward -n metronome svc/metronome-grafana 3000:80
+  ingress:
+    enabled: false
+
+  # --- Dashboard provisioning -------------------------------------------------
+  #
+  # The sidecar watches for ConfigMaps labelled `grafana_dashboard: "1"` in any
+  # namespace and drops their contents into Grafana's provisioning directory.
+  #
+  # This is what lets a dashboard be a file in Git rather than something someone
+  # built by clicking and nobody can reproduce. Commit the ConfigMap, ArgoCD
+  # syncs it, the sidecar loads it. Same loop as everything else.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      # Reload without restarting the Grafana process.
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+      searchNamespace: ALL
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 64Mi
+
+  # --- Datasources ------------------------------------------------------------
+  #
+  # Prometheus is wired up by the chart automatically. Loki is not, because it
+  # is a separate chart the chart knows nothing about — so it is declared here.
+  #
+  # Both in one Grafana is the point of the layer: a spike on a latency graph
+  # and the log lines from that exact second are two panels apart rather than
+  # two tools apart.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      access: proxy
+      # Resolves to the single-binary Loki service in this namespace.
+      url: http://loki:3100
+      isDefault: false
+      jsonData:
+        # Loki runs with auth_enabled:false (single tenant), so no
+        # X-Scope-OrgID header is needed. See metronome/loki/values.yaml.
+        maxLines: 1000
+        # Links a trace-less log line back to metrics for the same pod, which
+        # is the cheap 80% of correlation without running Tempo.
+        derivedFields: []

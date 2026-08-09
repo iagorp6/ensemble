@@ -1,0 +1,139 @@
+# =============================================================================
+# metronome / alertmanager / values.yaml
+# =============================================================================
+#
+# Alertmanager is the piece between "a rule evaluated true" and "a human found
+# out". Prometheus decides WHAT is wrong; Alertmanager decides who hears about
+# it, how often, and whether several related failures arrive as one message or
+# forty.
+#
+# It is also the seam with layer 7: `maestro` receives a webhook here.
+# =============================================================================
+
+alertmanager:
+  enabled: true
+
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
+    # Alertmanager persists the notification log — which alerts it has already
+    # sent, and which are silenced. Without it, a restart re-notifies everything
+    # currently firing, which is how a pod restart turns into a pager storm.
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 1Gi
+
+  ingress:
+    enabled: false
+
+  # --- Routing ----------------------------------------------------------------
+  config:
+    global:
+      resolve_timeout: 5m
+
+    route:
+      # ------------------------------------------------------------------
+      # The three timers, which are the whole craft of alert routing.
+      #
+      #   group_wait      how long to hold the FIRST alert of a new group,
+      #                   hoping siblings arrive so they can be sent together.
+      #                   30s means a node failure sends one message about
+      #                   twelve pods rather than twelve messages.
+      #
+      #   group_interval  how long before sending an UPDATE for a group that
+      #                   has already notified and has gained a new member.
+      #
+      #   repeat_interval how long before re-notifying about something still
+      #                   firing. Too short and people mute the channel; too
+      #                   long and a real outage goes quiet. 4h suits a
+      #                   platform with one operator and no rotation.
+      # ------------------------------------------------------------------
+      group_by: ["alertname", "namespace"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      receiver: "maestro"
+
+      routes:
+        # kube-prometheus-stack ships a permanently-firing `Watchdog` alert.
+        # It exists so you can alert on its ABSENCE — a dead-man's switch that
+        # catches "the monitoring stack itself stopped working", which is the
+        # failure no other alert can report. It must not reach a human, so it
+        # is routed to a null receiver.
+        - matchers:
+            - alertname = "Watchdog"
+          receiver: "null"
+          # Frequent enough that an external checker could notice it stopping.
+          repeat_interval: 5m
+
+        - matchers:
+            - severity = "critical"
+          receiver: "maestro"
+          repeat_interval: 1h
+
+    receivers:
+      - name: "null"
+
+      # ------------------------------------------------------------------
+      # maestro (layer 7).
+      #
+      # Alertmanager POSTs a JSON payload here containing every alert in the
+      # group, its labels, its annotations and its current value. maestro reads
+      # that and drafts a plain-English likely-cause note.
+      #
+      # It runs on the workstation, not in the cluster, so it is reached over an
+      # SSH reverse tunnel. 10.42.0.1 is the node's own address on the K3s pod
+      # network (the cni0 bridge gateway) — a stable, in-cluster-routable way
+      # for a pod to reach a port listening on the node. A `127.0.0.1` URL would
+      # resolve to the Alertmanager container itself, and `host.docker.internal`
+      # / `host.k3d.internal` only exist under Docker Desktop and k3d, not on a
+      # real K3s node.
+      #
+      # TWO THINGS HAVE TO BE TRUE for this to work, and layer 7 wires both:
+      #
+      #   1. The tunnel must bind on all interfaces, not just loopback:
+      #        ssh -R 0.0.0.0:9099:localhost:9099 stagehand@<node>
+      #   2. sshd must permit that. `GatewayPorts` defaults to `no`, and
+      #      `lockup` (layer 2) did not change it — so today the bind silently
+      #      falls back to loopback and the webhook times out with no error
+      #      that points at the cause. Layer 7 adds
+      #      `GatewayPorts clientspecified` to the hardening drop-in.
+      #
+      # `send_resolved: true` matters more than it looks. Without it you learn
+      # that something broke and never that it recovered, and your mental model
+      # of the system quietly drifts out of date.
+      #
+      # Delivery failures are logged and retried by Alertmanager. A missing
+      # maestro degrades the platform to "alerts fire and nobody summarises
+      # them" — which is the normal state of most systems, and is why nothing
+      # here depends on maestro being up.
+      # ------------------------------------------------------------------
+      - name: "maestro"
+        webhook_configs:
+          - url: "http://10.42.0.1:9099/alert"
+            send_resolved: true
+            max_alerts: 10
+
+    # Stop a resolved-and-refiring alert from notifying twice, and suppress
+    # noise that a bigger failure already explains.
+    inhibit_rules:
+      # If something critical is firing for a given alertname/namespace, don't
+      # also send the warning-level version of it.
+      - source_matchers:
+            - severity = "critical"
+        target_matchers:
+            - severity = "warning"
+        equal: ["alertname", "namespace"]
+
+    templates:
+      - "/etc/alertmanager/config/*.tmpl"

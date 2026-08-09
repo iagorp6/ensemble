@@ -1,0 +1,109 @@
+# =============================================================================
+# conductor/manifests/metronome/00-prometheus-stack.yaml
+# =============================================================================
+#
+# Dropped into conductor/manifests/, so `downbeat` picks it up and deploys it —
+# the app-of-apps pattern, with a Helm chart this time instead of `backstage`'s
+# Kustomize directory. Committing this file is the whole of "add a full
+# observability stack to the platform".
+#
+# MULTI-SOURCE, which is how a chart from one repo takes values from another.
+# The chart comes from Grafana's registry; the values come from this repo. The
+# `ref: values` source is not deployed — it exists only so `$values` can point
+# into it. Before ArgoCD supported this you had to either vendor the whole chart
+# or paste values inline into the Application, both of which make the values
+# unreviewable.
+#
+# THREE values files, merged in order. Each directory under metronome/ owns its
+# slice of the same chart, so a change to alert routing produces a diff that
+# touches only alert routing.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metronome-prometheus-stack
+  namespace: argocd
+  annotations:
+    # ------------------------------------------------------------------
+    # SYNC WAVES — ordering in a system that is otherwise unordered.
+    #
+    # ArgoCD applies everything in a wave, waits for it to report Healthy,
+    # then starts the next. Without waves it applies everything at once,
+    # and the ServiceMonitor and PrometheusRule in wave 2 would be rejected
+    # because their CRDs — installed by THIS chart — do not exist yet.
+    #
+    # That failure is self-correcting (ArgoCD retries and eventually
+    # succeeds) which is exactly why it is worth fixing properly: an
+    # eventually-consistent deploy that spends five minutes red teaches
+    # people to ignore red.
+    # ------------------------------------------------------------------
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      # Pinned. `helm upgrade` against an unpinned chart is how a monitoring
+      # stack changes shape without anyone deciding it should.
+      targetRevision: 88.2.0
+      helm:
+        releaseName: metronome
+        valueFiles:
+          - $values/metronome/prometheus/values.yaml
+          - $values/metronome/grafana/values.yaml
+          - $values/metronome/alertmanager/values.yaml
+
+    - repoURL: https://github.com/iagorp6/ensemble.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: metronome
+
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # PRUNE IS OFF HERE, and this is the one place in the platform where it
+      # is. kube-prometheus-stack owns CustomResourceDefinitions, and deleting
+      # a CRD deletes every object of that type cluster-wide — every
+      # ServiceMonitor, every PrometheusRule, in every namespace, including
+      # ones this Application never created. A momentary rendering glitch
+      # should not be able to do that.
+      #
+      # The cost is that a component removed from the values file lingers until
+      # someone deletes it by hand. That is the right side of this trade.
+      prune: false
+      allowEmpty: false
+
+    syncOptions:
+      - CreateNamespace=true
+      # Server-side apply is required, not optional: the Prometheus and
+      # Alertmanager CRDs exceed the 262144-byte annotation limit that
+      # client-side apply uses to store its last-applied state, and the sync
+      # fails outright with "metadata.annotations: Too long".
+      - ServerSideApply=true
+      - ServerSideDiff=true
+
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
+
+  ignoreDifferences:
+    # The operator writes its own CA bundle into these webhook configurations
+    # after they are created, so ArgoCD would see a permanent diff and fight it
+    # on every sync.
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle

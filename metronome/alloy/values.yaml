@@ -1,0 +1,154 @@
+# =============================================================================
+# metronome / alloy / values.yaml — shipping logs to Loki
+# =============================================================================
+#
+# Chart: grafana/alloy 1.11.1 (Alloy v1.18.1)
+#
+# WHY ALLOY AND NOT PROMTAIL
+#
+# Promtail is the tool nearly every Loki tutorial still uses. It reached END OF
+# LIFE on 2 March 2026 — no further updates, no security fixes, commercial
+# support ended. Grafana's own documentation says: "If you are currently using
+# Promtail, you must migrate to Alloy or another supported client."
+#
+# So Promtail would have been the obvious choice from any blog post written
+# before 2026, and the wrong one. Checking whether a component is still alive
+# before adopting it is a small habit that ages a platform well.
+#
+# Alloy is a single agent that can collect logs, metrics, traces and profiles.
+# Here it does exactly one job — tail container logs and write them to Loki —
+# because Prometheus already handles metrics and adding a second thing that
+# could scrape them is how you end up with two disagreeing sources of truth.
+# =============================================================================
+
+controller:
+  # A DaemonSet: one Alloy per node, reading that node's container log files.
+  # With one node this is one pod; it becomes correct automatically when a
+  # second node joins, which a Deployment would not.
+  type: daemonset
+
+alloy:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+  # Alloy's own UI. Genuinely useful for debugging a pipeline — it shows each
+  # component's health and the data flowing between them — and reached by
+  # port-forward like everything else here.
+  enableReporting: false
+
+  # --- The pipeline -----------------------------------------------------------
+  #
+  # Alloy's config language is a dataflow graph: each component declares where
+  # it gets data and exports a handle the next one consumes. Read it top to
+  # bottom as "discover pods -> filter -> tail files -> relabel -> write".
+  configMap:
+    create: true
+    content: |-
+      // Discover every pod in the cluster.
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
+      // Turn pod metadata into the labels a log stream will carry.
+      //
+      // THIS BLOCK IS WHERE LOKI COSTS ARE DECIDED. Every distinct combination
+      // of label values is a separate stream, with its own index entry and its
+      // own open chunk held in memory. The instinct is to promote everything
+      // useful — pod name, container id, node, image tag — and that is exactly
+      // how a small cluster ends up with tens of thousands of streams.
+      //
+      // Namespace, app and container are enough to find anything. Pod NAME is
+      // deliberately kept: it is bounded here (a Deployment with 2 replicas),
+      // and without it you cannot tell two replicas apart when only one is
+      // misbehaving. On a cluster with churny Jobs it would be the first label
+      // to drop.
+      //
+      // Everything else stays in the log line, searchable with LogQL filters,
+      // which costs query time instead of index space. That trade — cheap
+      // writes, slightly more expensive reads — is the whole design of Loki
+      // and the reason it runs in 640 MB when Elasticsearch would not.
+      discovery.relabel "pod_logs" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        // The path Alloy actually reads from on the node.
+        rule {
+          source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+          separator     = "/"
+          action        = "replace"
+          replacement   = "/var/log/pods/*$1/*.log"
+          target_label  = "__path__"
+        }
+      }
+
+      // Read the files.
+      loki.source.kubernetes "pod_logs" {
+        targets    = discovery.relabel.pod_logs.output
+        forward_to = [loki.process.drop_noise.receiver]
+      }
+
+      // A processing stage before writing.
+      loki.process "drop_noise" {
+        forward_to = [loki.write.default.receiver]
+
+        // Health-check requests are the single largest source of log volume on
+        // a cluster that is working correctly: two probes per pod every ten
+        // seconds, forever, all of them saying nothing happened. Dropping them
+        // at the agent costs nothing and is the difference between a 7-day
+        // retention window and a 2-day one on the same disk.
+        stage.drop {
+          expression = ".*(GET /healthz|GET /readyz).*"
+          drop_counter_reason = "health_check"
+        }
+
+        // overture logs JSON via log/slog. Parsing it here means the fields are
+        // queryable in Grafana as structured data rather than as a string that
+        // happens to contain braces.
+        stage.json {
+          expressions = {
+            level = "level",
+            msg   = "msg",
+          }
+        }
+
+        // Promote severity to a label so `{level="ERROR"}` is an index lookup
+        // rather than a scan. Bounded set, so it is safe to promote — unlike
+        // `msg`, which is unbounded and must stay in the line.
+        stage.labels {
+          values = {
+            level = "",
+          }
+        }
+      }
+
+      // Write to the single-binary Loki in this namespace.
+      loki.write "default" {
+        endpoint {
+          url = "http://loki:3100/loki/api/v1/push"
+        }
+      }
+
+# Alloy needs to read /var/log/pods on the host, which is a hostPath mount —
+# the one place in this platform where a workload reaches outside its container
+# by design. It is why this runs as a DaemonSet with elevated access and the
+# application pods do not.
+alloy_config_reloader: {}

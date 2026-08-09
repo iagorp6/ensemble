@@ -6,7 +6,7 @@ decisions get argued rather than stated.
 Written incrementally — each layer gets its section as it's built, so this file
 tracks the real state of the repo rather than an aspirational one.
 
-**Built so far:** layers 1 (`tuning`), 2 (`rehearsal`), 3 (`score`), 4 (`conductor`) and 5 (`backstage`).
+**Built so far:** layers 1–6. Only `maestro` (layer 7) remains.
 
 ---
 
@@ -350,93 +350,6 @@ the firewall. Each of those has a specific trap in this layer.
 
 ---
 
-## Layer 4 — `conductor`
-
-Full documentation: [conductor/README.md](../conductor/README.md).
-
-Built before layer 3 because it doesn't depend on it. ArgoCD needed the cluster
-layer 2 produced; `score` needs nothing but a repository. The seam between them
-is one image tag.
-
-### The loop
-
-```mermaid
-flowchart LR
-    git[("GitHub<br/>conductor/manifests/")]
-
-    subgraph cluster["K3s cluster"]
-        subgraph argons["namespace: argocd"]
-            repo["repo-server"]
-            ctrl["application-controller"]
-            api["server (UI/API)"]
-        end
-        app["overture<br/>namespace: overture"]
-    end
-
-    workstation["workstation"]
-
-    git -. "polls, every 3 min" .-> repo
-    repo --> ctrl
-    ctrl -- "apply / prune / revert drift" --> app
-    api <--> ctrl
-    workstation -. "port-forward only" .-> api
-```
-
-Every arrow touching the cluster points inward and is initiated from inside.
-That's what pull-based means structurally, and it's why no credential capable of
-changing this cluster exists anywhere outside it once bootstrap is done.
-
-### Decisions worth defending
-
-**The bootstrap seam is admitted, not hidden.** Something has to install the
-thing that watches Git, and that something cannot itself be GitOps. Every GitOps
-setup has this seam; most bury it in a README bullet. Here it's one idempotent
-script, `bootstrap/install.sh`, and the moment it finishes the workstation's
-kubeconfig stops being load-bearing.
-
-**`selfHeal` and `prune` are what make it GitOps rather than a deploy button.**
-Without `selfHeal`, a `kubectl edit` persists silently until the next deploy and
-the cluster is authored in two places. Without `prune`, deleting a file stops
-updating a resource but leaves it running forever. Together they make the
-cluster a projection of the repository rather than a place where state
-accumulates.
-
-**No public ingress for the ArgoCD UI.** Layer 1 opened 80/443 for the
-application; ArgoCD is deliberately not on them. Its API can change anything in
-the cluster, so exposing it publicly makes it the highest-value target on the
-platform behind one password. A port-forward costs one command — and
-`AllowTcpForwarding`, which layer 2 kept on, is what makes that the cheap
-option.
-
-**CPU requests, no CPU limits.** A CPU limit is enforced by the kernel's CFS
-quota and throttles *even when the node is idle*, converting spare capacity into
-latency on a two-core box. Memory is incompressible — a process wanting more RAM
-than exists can only be killed — so memory gets a hard limit. Requests total
-550m CPU and 1 GB RAM across five workloads.
-
-**`crds.keep: true`.** Otherwise `helm uninstall` deletes the `Application` CRD,
-which deletes every Application, whose finalizers then delete every deployed
-workload. Uninstalling the deployment tool would take production with it.
-
-**`applicationSet` stays on because it cannot be turned off.** Chart 10.x
-removed the `enabled` key. Writing `applicationSet.enabled: false` is not an
-error in Helm — it's silently nothing, which is the most irritating class of
-config bug. Verified by rendering the chart and checking the workload is present.
-
-### Verification
-
-The chart was rendered locally with these values and asserted against, rather
-than trusted: dex and notifications absent, ApplicationSet present, no Ingress,
-`server.insecure` landing in `argocd-cmd-params-cm`, no CPU limits anywhere,
-every workload carrying requests. The rendered output and the repo's own
-manifests were then schema-checked against real Kubernetes and CRD schemas.
-
-podinfo's `linux/arm64` support was confirmed from the registry's manifest
-index — the constraint layer 1 propagated, and the likeliest cause of a
-crash-loop on this platform.
-
----
-
 ## Layer 3 — `score`
 
 Full documentation: [score/README.md](../score/README.md).
@@ -533,6 +446,93 @@ The next push touching `score/**` exercises them.
 
 ---
 
+## Layer 4 — `conductor`
+
+Full documentation: [conductor/README.md](../conductor/README.md).
+
+Built before layer 3 because it doesn't depend on it. ArgoCD needed the cluster
+layer 2 produced; `score` needs nothing but a repository. The seam between them
+is one image tag.
+
+### The loop
+
+```mermaid
+flowchart LR
+    git[("GitHub<br/>conductor/manifests/")]
+
+    subgraph cluster["K3s cluster"]
+        subgraph argons["namespace: argocd"]
+            repo["repo-server"]
+            ctrl["application-controller"]
+            api["server (UI/API)"]
+        end
+        app["overture<br/>namespace: overture"]
+    end
+
+    workstation["workstation"]
+
+    git -. "polls, every 3 min" .-> repo
+    repo --> ctrl
+    ctrl -- "apply / prune / revert drift" --> app
+    api <--> ctrl
+    workstation -. "port-forward only" .-> api
+```
+
+Every arrow touching the cluster points inward and is initiated from inside.
+That's what pull-based means structurally, and it's why no credential capable of
+changing this cluster exists anywhere outside it once bootstrap is done.
+
+### Decisions worth defending
+
+**The bootstrap seam is admitted, not hidden.** Something has to install the
+thing that watches Git, and that something cannot itself be GitOps. Every GitOps
+setup has this seam; most bury it in a README bullet. Here it's one idempotent
+script, `bootstrap/install.sh`, and the moment it finishes the workstation's
+kubeconfig stops being load-bearing.
+
+**`selfHeal` and `prune` are what make it GitOps rather than a deploy button.**
+Without `selfHeal`, a `kubectl edit` persists silently until the next deploy and
+the cluster is authored in two places. Without `prune`, deleting a file stops
+updating a resource but leaves it running forever. Together they make the
+cluster a projection of the repository rather than a place where state
+accumulates.
+
+**No public ingress for the ArgoCD UI.** Layer 1 opened 80/443 for the
+application; ArgoCD is deliberately not on them. Its API can change anything in
+the cluster, so exposing it publicly makes it the highest-value target on the
+platform behind one password. A port-forward costs one command — and
+`AllowTcpForwarding`, which layer 2 kept on, is what makes that the cheap
+option.
+
+**CPU requests, no CPU limits.** A CPU limit is enforced by the kernel's CFS
+quota and throttles *even when the node is idle*, converting spare capacity into
+latency on a two-core box. Memory is incompressible — a process wanting more RAM
+than exists can only be killed — so memory gets a hard limit. Requests total
+550m CPU and 1 GB RAM across five workloads.
+
+**`crds.keep: true`.** Otherwise `helm uninstall` deletes the `Application` CRD,
+which deletes every Application, whose finalizers then delete every deployed
+workload. Uninstalling the deployment tool would take production with it.
+
+**`applicationSet` stays on because it cannot be turned off.** Chart 10.x
+removed the `enabled` key. Writing `applicationSet.enabled: false` is not an
+error in Helm — it's silently nothing, which is the most irritating class of
+config bug. Verified by rendering the chart and checking the workload is present.
+
+### Verification
+
+The chart was rendered locally with these values and asserted against, rather
+than trusted: dex and notifications absent, ApplicationSet present, no Ingress,
+`server.insecure` landing in `argocd-cmd-params-cm`, no CPU limits anywhere,
+every workload carrying requests. The rendered output and the repo's own
+manifests were then schema-checked against real Kubernetes and CRD schemas.
+
+podinfo's `linux/arm64` support was confirmed from the registry's manifest
+index — the constraint layer 1 propagated, and the likeliest cause of a
+crash-loop on this platform.
+
+---
+
 ## Layer 5 — `backstage`
 
 Full documentation: [backstage/README.md](../backstage/README.md).
@@ -620,18 +620,90 @@ The ArgoCD decrypt-at-sync path itself is unrun; it needs a cluster.
 
 ---
 
-## Layers 6, 7
+## Layer 6 — `metronome`
 
-Not built yet.
+Full documentation: [metronome/README.md](../metronome/README.md).
 
-- **`metronome`** has 12 GB shared with everything else, so retention and scrape
-  intervals are configuration decisions rather than defaults. The inotify limits
-  are already raised for it, `overture` already exposes a histogram and carries
-  the scrape annotations, and it arrives as an `Application` dropped into
-  `conductor/manifests/` — the same way `backstage` just did.
-- **`maestro`** consumes Alertmanager webhooks and needs no cluster access —
-  a consumer of alerts, not a participant. The shared token Alertmanager
-  presents to it belongs in `backstage`, with the wrinkle that maestro runs on
-  the workstation, so its copy is a local `.env` rather than a Kubernetes
-  Secret. Same
-  value, two delivery mechanisms, because the consumers are in different places.
+Four Applications in `conductor/manifests/metronome/`, ordered by sync wave:
+stack (0) → Loki (1) → Alloy (2) → rules (3).
+
+### Decisions worth defending
+
+**The layer is mostly subtraction.** Both charts default to shapes built for
+much larger clusters. Loki's default `SimpleScalable` mode is twelve pods
+against S3 storage that doesn't exist — not a tuning problem on 2 OCPU, a
+non-starter. SingleBinary is the same Loki and the same LogQL; what it gives up
+is horizontal scale and durability beyond the node, neither of which a
+single-node cluster has anyway.
+
+**The K3s trap, same shape as layer 2's iptables one.** K3s runs the API server,
+controller-manager and scheduler in one process and uses SQLite, not etcd. The
+chart's default ServiceMonitors point at endpoints that were never created, so
+leaving them on produces four permanently-down targets and alerts that fire
+forever — worse than no monitoring, because a dashboard that is always red
+teaches you to stop looking.
+
+**Both retention limits, and the second is the real one.** A time bound is a
+promise about age, not disk; how much data that is depends on series count,
+which changes every deploy. `retentionSize` is the actual safety net. Loki has
+the identical trap — `retention_period` is advisory until
+`compactor.retention_enabled` tells something to delete.
+
+**`60s` intervals halve the cost and lose something real:** outages shorter than
+a minute can be missed. Acceptable when thresholds are measured in minutes; not
+on a payments system.
+
+**Few log labels, on purpose.** Every label combination is a Loki stream with
+its own index entry and open chunk. Five labels; everything else stays in the
+line for LogQL to filter. Cheap writes, dearer reads — the design that lets Loki
+run in 640 MB where Elasticsearch would not. Same discipline as `score`'s
+metric-cardinality guard.
+
+**Alloy, not Promtail.** Promtail is what the tutorials still use, and it
+reached end of life on 2 March 2026. Checking whether a component is still alive
+before adopting it is a small habit that ages a platform well.
+
+**`prune: false` on the stack Application alone.** It owns CRDs, and deleting a
+CRD deletes every object of that type cluster-wide — including ones this
+Application never created. Everything else in the platform prunes.
+
+### Verification
+
+Rendered from the real charts and asserted against: no ServiceMonitor for the
+four absent K3s components, 27 rule groups remaining of 34, Loki down from
+twelve workloads to one with filesystem storage and single-tenant auth, and the
+full footprint totalled at **76% of CPU requests / 48% of RAM at worst case**.
+13 manifests schema-valid; the embedded dashboard parses with 5 panels.
+
+Worth recording a mistake the first pass made: Prometheus and Alertmanager do
+not appear as Deployments in rendered output — the Operator creates them at
+runtime from custom resources. A naive scan therefore omits the two largest
+consumers and reports a comfortably wrong total.
+
+Nothing has run; no cluster exists yet.
+
+---
+
+## Layer 7 — `maestro`
+
+Not built yet. It consumes Alertmanager webhooks and needs no cluster access —
+a consumer of alerts, not a participant, which is why nothing else depends on
+it being up.
+
+Two things layer 6 has already committed to on its behalf:
+
+- Alertmanager posts to `http://10.42.0.1:9099/alert` — the node's own address
+  on the K3s pod network, reachable from a pod over an SSH reverse tunnel. Two
+  things must be true for that to work and layer 7 wires both: the tunnel has to
+  bind on all interfaces, and sshd's `GatewayPorts` has to permit it. It
+  defaults to `no` and `lockup` did not change it, so today the bind silently
+  falls back to loopback and the webhook times out with nothing in any log
+  pointing at the cause.
+- The alert's `runbook` annotation is written as instructions to a human, which
+  is what makes it useful to a model as well — both need to know what to look at
+  first.
+
+Its shared token belongs in `backstage`, with the wrinkle that maestro runs on
+the workstation, so its copy is a local `.env` rather than a Kubernetes Secret.
+Same value, two delivery mechanisms, because the consumers are in different
+places.

@@ -1,0 +1,50 @@
+# =============================================================================
+# conductor/manifests/metronome/10-loki.yaml
+# =============================================================================
+#
+# Wave 1: after the Prometheus stack, because Loki's chart creates a
+# ServiceMonitor for its own metrics and that CRD arrives in wave 0.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metronome-loki
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  sources:
+    - repoURL: https://grafana.github.io/helm-charts
+      chart: loki
+      targetRevision: 7.2.0
+      helm:
+        releaseName: loki
+        valueFiles:
+          - $values/metronome/loki/values.yaml
+
+    - repoURL: https://github.com/iagorp6/ensemble.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: metronome
+
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

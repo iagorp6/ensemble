@@ -1,0 +1,98 @@
+# =============================================================================
+# metronome / rules / prometheusrule-overture.yaml — the one real alert
+# =============================================================================
+#
+# ONE alert, deliberately. kube-prometheus-stack already ships around 34 groups
+# of them for the cluster itself; what was missing was an alert about the
+# APPLICATION, written against metrics the application chose to expose.
+#
+# Resisting the urge to add ten is the point. An alert nobody has agreed to act
+# on is not monitoring, it is a notification, and a channel full of
+# notifications is how real alerts get missed. The bar for adding a second one
+# should be "what would I do differently at 3am if this fired?"
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: overture
+  namespace: metronome
+  labels:
+    app.kubernetes.io/name: overture
+    app.kubernetes.io/part-of: ensemble
+spec:
+  groups:
+    - name: overture
+      # Matches the global evaluation interval. Evaluating more often than
+      # Prometheus scrapes just re-reads the same samples.
+      interval: 60s
+
+      rules:
+        - alert: OvertureHighErrorRate
+          # ------------------------------------------------------------------
+          # Server-side error RATIO, not error COUNT.
+          #
+          # A count threshold ("more than 10 errors a minute") breaks in both
+          # directions: it is deafening under load and silent at 3am when three
+          # requests out of three fail. A ratio is traffic-independent, which is
+          # what makes one threshold work at every hour.
+          #
+          # 5xx only. 4xx is the client being wrong — a scanner probing
+          # /private, a stale bookmark — and paging a human because someone
+          # else sent a bad request is how alert fatigue starts. Those are worth
+          # a dashboard, not an alert.
+          #
+          # ON THE DIVIDE-BY-ZERO: with no traffic both sides are 0, and 0/0 is
+          # NaN in PromQL. `NaN > 0.05` is false, so idle periods cannot fire
+          # this — which is the behaviour you want and is worth knowing rather
+          # than discovering. It also means this alert says nothing at all when
+          # the app is receiving no requests; that case belongs to
+          # `up{job="overture"} == 0`, which the chart's KubePodNotReady and
+          # TargetDown rules already cover.
+          #
+          # rate() over 5m against a 60s scrape gives five samples per window —
+          # enough to be stable, short enough to notice a real problem quickly.
+          # ------------------------------------------------------------------
+          expr: |
+            (
+              sum(rate(overture_requests_total{job="overture",status="5xx"}[5m]))
+              /
+              sum(rate(overture_requests_total{job="overture"}[5m]))
+            ) > 0.05
+
+          # Must be true continuously for 5 minutes. This is the single most
+          # important field in the file: without it, one bad scrape during a
+          # rolling update pages someone. With it, a deploy blip resolves itself
+          # and only a sustained problem gets through.
+          #
+          # The cost is 5 minutes of delay on a genuine outage. That is the
+          # trade every `for:` makes, and 5m is chosen because it is longer than
+          # the rolling update this Deployment performs.
+          for: 5m
+
+          labels:
+            severity: warning
+            # Routed on by Alertmanager, and read by maestro for context.
+            service: overture
+
+          annotations:
+            summary: "overture is returning 5xx to more than 5% of requests"
+            description: >-
+              {{ $value | humanizePercentage }} of requests to overture have
+              returned a 5xx over the last 5 minutes, sustained for 5 minutes.
+              This is the application failing, not a client sending bad
+              requests — 4xx is excluded from this ratio.
+            # maestro (layer 7) reads these annotations along with the recent
+            # logs for the same pod. Writing them as instructions to a human
+            # is what makes them useful to a model as well: both need to know
+            # what to look at first.
+            runbook: >-
+              1. Which version? `kubectl -n overture get deploy overture
+                 -o jsonpath='{.spec.template.spec.containers[0].image}'`
+              2. Did this start at a deploy? Compare the alert start time with
+                 `git log conductor/manifests/overture/`.
+              3. If it did, the rollback is `git revert` of that commit — the
+                 image is pinned by digest, so reverting restores the exact
+                 bytes that were working.
+              4. Logs for the failing replica:
+                 `{namespace="overture", level="ERROR"}` in Grafana.
+            dashboard: "overture"

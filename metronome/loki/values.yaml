@@ -1,0 +1,165 @@
+# =============================================================================
+# metronome / loki / values.yaml — Loki, cut down from 9 pods to 1
+# =============================================================================
+#
+# Chart: grafana/loki 7.2.0 (Loki 3.6.11)
+#
+# THIS FILE IS MOSTLY SUBTRACTION, and that is the point of the layer.
+#
+# The chart defaults to `deploymentMode: SimpleScalable`, which means:
+#
+#     backend        3 replicas
+#     read           3 replicas
+#     write          3 replicas
+#     chunksCache    1 memcached
+#     resultsCache   1 memcached
+#     gateway        1 nginx
+#     ------------------------------
+#     12 pods, and storage.type: s3 — so it also wants object storage that
+#     does not exist here, and fails to start without it.
+#
+# Those defaults are right for the environment Grafana Labs is aiming at:
+# multi-tenant, horizontally scaled, backed by real object storage. On 2 OCPU
+# with ~1 GB to spare they are not a tuning problem, they are a non-starter.
+#
+# SingleBinary mode runs every Loki component in one process against the local
+# filesystem. It is the same Loki and the same LogQL — what it gives up is
+# horizontal scaling and durability beyond the node, neither of which exists on
+# a single-node cluster anyway.
+#
+# Knowing which mode to pick, and being able to say what you gave up, is more of
+# the job than knowing how to run the big one.
+# =============================================================================
+
+deploymentMode: SingleBinary
+
+loki:
+  # Multi-tenancy off. With auth_enabled: true (the default) every read and
+  # write must carry an X-Scope-OrgID header, and forgetting it produces empty
+  # query results rather than an error — you get a working Grafana panel that
+  # shows nothing, forever.
+  #
+  # One tenant here, so this is honest rather than lazy.
+  auth_enabled: false
+
+  commonConfig:
+    # Default is 3. With one instance, asking for three copies of every chunk
+    # means Loki waits for acknowledgements that can never arrive.
+    replication_factor: 1
+    path_prefix: /var/loki
+
+  storage:
+    # Default is s3. Filesystem stores chunks and the index on the PVC below.
+    type: filesystem
+
+  # The schema config is empty by default and Loki will not start without one.
+  # TSDB is the current index format — v13 is the schema that goes with it, and
+  # `from` must be a date in the past.
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+
+  limits_config:
+    # --- Retention -----------------------------------------------------------
+    #
+    # 7 days, matching Prometheus. Correlating a metric spike with the logs from
+    # that moment only works if both still exist, so the two windows should be
+    # the same number — and it is worth setting them from the same decision
+    # rather than accepting two different defaults.
+    retention_period: 168h
+
+    # --- The ingestion limits that stop one noisy pod eating the node --------
+    #
+    # A container in a crash loop can emit tens of MB of logs per minute. These
+    # caps mean it degrades to "some lines dropped" instead of "Loki OOMs and
+    # all logging stops", which is the failure that takes observability down
+    # exactly when something is already wrong.
+    ingestion_rate_mb: 8
+    ingestion_burst_size_mb: 16
+    per_stream_rate_limit: 4MB
+    per_stream_rate_limit_burst: 8MB
+
+    # Cardinality control, same idea as metric labels in `score`. Every unique
+    # label combination is a separate stream with its own index entry and its
+    # own open chunk in memory.
+    max_label_names_per_series: 15
+    max_streams_per_user: 5000
+
+    # Reject logs older than the retention window rather than storing data
+    # that will be deleted on the next compaction.
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+
+    max_query_series: 500
+    max_query_parallelism: 4
+
+  # Retention is only ENFORCED if the compactor is told to delete. Without
+  # this, retention_period is advisory and the disk fills anyway — the same
+  # shape of trap as Prometheus's retentionSize.
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+
+  # Loki's own metrics, scraped by Prometheus via the ServiceMonitor below.
+  # Monitoring the monitoring is not paranoia: Loki silently dropping writes
+  # because of a rate limit looks exactly like an application that stopped
+  # logging.
+  analytics:
+    reporting_enabled: false
+
+singleBinary:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 640Mi
+  persistence:
+    enabled: true
+    storageClass: local-path
+    size: 10Gi
+
+# --- Everything SimpleScalable would have run, switched off -------------------
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+
+# memcached in front of a single-binary Loki querying local disk buys nothing
+# and costs two pods.
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+# An nginx reverse proxy that fans out to the read/write paths. With one
+# process to talk to there is nothing to fan out to.
+gateway:
+  enabled: false
+
+# A DaemonSet that continuously writes and reads back canary log lines to prove
+# the pipeline works end to end. Genuinely useful at scale; here it is a pod
+# and a stream of writes to catch a failure that `soundcheck` would also catch.
+lokiCanary:
+  enabled: false
+
+test:
+  enabled: false
+
+# Expose Loki's own metrics to Prometheus.
+monitoring:
+  selfMonitoring:
+    enabled: false
+    grafanaAgent:
+      installOperator: false
+  serviceMonitor:
+    enabled: true

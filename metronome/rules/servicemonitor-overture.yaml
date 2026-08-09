@@ -1,0 +1,77 @@
+# =============================================================================
+# metronome / rules / servicemonitor-overture.yaml
+# =============================================================================
+#
+# TWO WAYS TO TELL PROMETHEUS TO SCRAPE SOMETHING, AND WHY THIS IS THE OTHER ONE
+#
+# Layer 4 put `prometheus.io/scrape: "true"` annotations on overture's pods.
+# That is the classic approach: one global scrape config in prometheus.yml does
+# Kubernetes service discovery across the whole cluster and relabels based on
+# annotations. It works, and it is what you use when you run Prometheus yourself
+# from a config file.
+#
+# The Prometheus Operator — which is what kube-prometheus-stack installs —
+# inverts it. Scrape targets become Kubernetes objects: a ServiceMonitor says
+# "scrape the Services matching this selector, on this port, at this path", and
+# the operator regenerates Prometheus's config whenever one changes.
+#
+# Why that is better here:
+#
+#   - It is reviewable. This file is a diff in a pull request. An annotation
+#     buried in a Deployment is not obviously a monitoring change.
+#   - It is validated. A malformed ServiceMonitor is rejected by the API server;
+#     a typo'd annotation is silently ignored and the target just never appears.
+#   - The scrape interval, timeout and relabelling live with the target rather
+#     than in one global config that every team has to agree on.
+#
+# The annotations on the Deployment are now redundant. They are left in place
+# deliberately: they document intent for anyone reading the Deployment alone,
+# they cost nothing, and they are what would make this app scrapeable again if
+# the operator were ever removed.
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: overture
+  namespace: metronome
+  labels:
+    app.kubernetes.io/name: overture
+    app.kubernetes.io/part-of: ensemble
+spec:
+  # Which Services to scrape. The selector matches labels on the SERVICE, not
+  # on the pods — a common hour-long confusion. overture's Service carries
+  # app.kubernetes.io/name: overture.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: overture
+
+  # This ServiceMonitor lives in the metronome namespace; the Service it targets
+  # lives in overture. Without this, the selector only looks in its own
+  # namespace and silently matches nothing.
+  namespaceSelector:
+    matchNames:
+      - overture
+
+  endpoints:
+    # The Service's port NAME, not its number. Using the name means renumbering
+    # the port doesn't break monitoring.
+    - port: http
+      path: /metrics
+      # Matches the global 60s from prometheus/values.yaml. Stated explicitly
+      # because a per-target interval is the knob you reach for when one
+      # endpoint is expensive, and having it written down makes that visible.
+      interval: 60s
+      scrapeTimeout: 10s
+
+      relabelings:
+        # By default every sample gets `pod`, `namespace`, `service`, `endpoint`
+        # and `container` labels. That is usually right — but `endpoint` and
+        # `container` are constant here and add cardinality for nothing.
+        - action: labeldrop
+          regex: "endpoint|container"
+
+        # A stable `job` label. Alert expressions and dashboards reference this,
+        # so pinning it means renaming the Service later doesn't silently break
+        # every query that mentions it.
+        - targetLabel: job
+          replacement: overture

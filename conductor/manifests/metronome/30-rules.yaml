@@ -1,0 +1,50 @@
+# =============================================================================
+# conductor/manifests/metronome/30-rules.yaml
+# =============================================================================
+#
+# Wave 3, last. Everything here is a CUSTOM RESOURCE whose CRD is installed by
+# the chart in wave 0 — ServiceMonitor and PrometheusRule — plus the dashboard
+# ConfigMap. Applied before wave 0 completes, the API server rejects them with
+# "no matches for kind", which reads like a typo and is really an ordering
+# problem.
+#
+# These are plain manifests rather than a chart, so this Application points
+# straight at a directory in this repo.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metronome-rules
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/iagorp6/ensemble.git
+    targetRevision: main
+    path: metronome/rules
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: metronome
+
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # Safe to prune here, unlike wave 0: nothing in this directory owns a
+      # CRD, so removing a file deletes exactly one object.
+      prune: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m

@@ -1,0 +1,216 @@
+# =============================================================================
+# metronome / prometheus / values.yaml — kube-prometheus-stack, sized to fit
+# =============================================================================
+#
+# Chart: prometheus-community/kube-prometheus-stack 88.2.0 (operator v0.93.0)
+#
+# This chart's defaults assume a real cluster with room to spare. This node has
+# 2 OCPU and 12 GB, and roughly 5 GB of that is already spoken for by K3s,
+# ArgoCD and the app. Everything below is a decision about that budget.
+#
+# Three defaults in particular would eventually take the node down:
+#
+#   retentionSize: ''   unlimited. Prometheus fills the disk and stops.
+#   resources: {}       unlimited. Prometheus OOM-kills its neighbours.
+#   storageSpec: {}     emptyDir. All history lost on every pod restart, which
+#                       is the opposite of what a monitoring system is for.
+#
+# WHY HELM AT ALL, rather than committing the rendered YAML
+#
+# kube-prometheus-stack renders to roughly 10,000 lines across the operator,
+# its CRDs, Prometheus, Alertmanager, Grafana, node-exporter, kube-state-metrics
+# and ~34 groups of recording and alerting rules. Hand-maintaining that is not
+# a real option, and neither is reviewing a diff of it.
+#
+# What Helm gives here is not templating — it is a SUPPORTED UPGRADE PATH. This
+# file is the delta between "what the chart authors think is sensible" and "what
+# this cluster can afford", which is about 120 lines instead of 10,000. Bumping
+# the chart version picks up upstream fixes and my decisions survive, because
+# they are expressed as overrides rather than as edits.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Control-plane scrape targets that DO NOT EXIST on K3s
+# -----------------------------------------------------------------------------
+#
+# This is the K3s equivalent of layer 2's iptables trap: the defaults are
+# correct for a normal cluster and quietly wrong here.
+#
+# K3s runs the API server, controller-manager, scheduler and (on a single node)
+# the datastore inside ONE process. There are no separate kube-controller-
+# manager or kube-scheduler pods, and no etcd at all — a single-node K3s uses
+# SQLite. The chart's default ServiceMonitors point at endpoints that were never
+# created.
+#
+# Leave these on and the result is four permanently-down scrape targets and a
+# steady drip of KubeControllerManagerDown / KubeSchedulerDown / etcd alerts
+# firing forever. Which is worse than no monitoring, because a dashboard that is
+# always red teaches you to stop looking at it.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# Default alerting and recording rules
+# -----------------------------------------------------------------------------
+defaultRules:
+  create: true
+  rules:
+    # The rule groups matching the components disabled above. Their alerts
+    # would fire against targets that do not exist.
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+
+    # No Windows nodes.
+    windows: false
+
+    # The API-server SLO rules are multi-window, multi-burn-rate — the pattern
+    # from the Google SRE workbook. They are excellent and they are also among
+    # the most expensive recording rules in the whole stack, evaluating dozens
+    # of long-range queries every interval.
+    #
+    # Turned off because a single-node cluster with one operator has no error
+    # budget policy to enforce and nobody to page. This is the clearest example
+    # in the layer of "correct in general, not worth its cost here".
+    kubeApiserverBurnrate: false
+    kubeApiserverHistogram: false
+    kubeApiserverSlos: false
+
+# -----------------------------------------------------------------------------
+# Prometheus
+# -----------------------------------------------------------------------------
+prometheus:
+  prometheusSpec:
+    # --- Retention: BOTH limits, and the second one is the important one -----
+    #
+    # `retention` is a time bound. On its own it is a promise about how long
+    # data lives, not about how much disk it uses — and the amount of data
+    # depends on how many series get scraped, which changes every time you
+    # deploy something. A cardinality spike then fills the volume, Prometheus
+    # stops accepting writes, and monitoring dies exactly when you need it.
+    #
+    # `retentionSize` is the actual safety net: a hard ceiling that evicts the
+    # oldest blocks. Set to 8GB against a 10Gi volume, leaving headroom for the
+    # write-ahead log and compaction, which need working space beyond the
+    # blocks themselves.
+    retention: 7d
+    retentionSize: 8GB
+
+    # --- Scrape and evaluation interval --------------------------------------
+    #
+    # The chart default is 30s. 60s halves the sample count, and therefore
+    # roughly halves both memory and disk, for the loss of resolution between
+    # 30 and 60 seconds.
+    #
+    # That loss is real and worth naming: an outage shorter than a minute can
+    # be missed entirely. On a platform whose alert thresholds are measured in
+    # minutes, that is an acceptable trade. On a payments system it would not
+    # be.
+    scrapeInterval: 60s
+    evaluationInterval: 60s
+
+    # --- Storage --------------------------------------------------------------
+    #
+    # local-path is the provisioner K3s ships. It binds a directory on the node,
+    # which means the data is exactly as durable as the node — fine here, since
+    # there is only one node and losing it means losing everything anyway.
+    #
+    # The alternative, and the chart's default, is emptyDir: metrics vanish on
+    # every pod restart. A monitoring system that forgets what happened before
+    # the last restart cannot answer the only question anyone asks it, which is
+    # "was it like this yesterday?"
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+    # --- Picking up OUR ServiceMonitors and rules ------------------------------
+    #
+    # The chart defaults these to `true`, which makes Prometheus only select
+    # ServiceMonitors and PrometheusRules carrying `release: <release-name>`.
+    # That is a sensible default for a cluster with several Prometheus
+    # instances, and here it means a ServiceMonitor committed in metronome/rules
+    # is silently ignored — no error, no warning, the target simply never
+    # appears. Setting these false selects everything in the cluster.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+
+    # --- Resources ------------------------------------------------------------
+    #
+    # Memory limit but no CPU limit, for the reason set out in layer 4: a CPU
+    # limit throttles via the kernel's CFS quota even on an idle node, and
+    # Prometheus is bursty — compaction and rule evaluation want whatever is
+    # spare. Memory is incompressible, so it gets a hard ceiling.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 1500Mi
+
+    # Compresses the write-ahead log. Roughly halves WAL disk and the memory
+    # spent replaying it after a restart, for a few percent CPU.
+    walCompression: true
+
+    # Nothing external needs to reach Prometheus directly — Grafana queries it
+    # in-cluster and Alertmanager is pushed to. No ingress, same reasoning as
+    # ArgoCD in layer 4.
+  ingress:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# The exporters
+# -----------------------------------------------------------------------------
+kubeStateMetrics:
+  enabled: true
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+nodeExporter:
+  enabled: true
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+  # The admission webhook validates PrometheusRule objects before they are
+  # accepted — a malformed PromQL expression is rejected at apply time instead
+  # of silently breaking rule evaluation later. Worth its ~30 MB, and worth
+  # more here than usual because ArgoCD applies rules unattended.
+  admissionWebhooks:
+    enabled: true
+    patch:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi

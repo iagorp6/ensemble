@@ -1,0 +1,51 @@
+# =============================================================================
+# conductor/manifests/metronome/20-alloy.yaml
+# =============================================================================
+#
+# Wave 2: after Loki, because Alloy starts writing immediately and a write to a
+# Loki that is not up yet is a retry loop and a page of errors in the logs of
+# the thing whose job is collecting logs.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metronome-alloy
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  sources:
+    - repoURL: https://grafana.github.io/helm-charts
+      chart: alloy
+      targetRevision: 1.11.1
+      helm:
+        releaseName: alloy
+        valueFiles:
+          - $values/metronome/alloy/values.yaml
+
+    - repoURL: https://github.com/iagorp6/ensemble.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: metronome
+
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
