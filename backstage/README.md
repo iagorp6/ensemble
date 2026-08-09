@@ -265,8 +265,8 @@ Real tooling, real round trip — sops 3.13.3 and age 1.3.1:
   but none were"*
 - Flipping one byte of ciphertext fails the MAC: *"cipher: message
   authentication failed"* — so tampering is detected, not silently applied
-- 26 Go tests pass, including the endpoint sweep asserting the token leaks into
-  no response
+- 32 Go cases pass across 12 test functions, including the endpoint sweep
+  asserting the token leaks into no response
 
 **Not verified:** the ArgoCD side. The ksops init container, the `--enable-exec`
 kustomize build, and the decrypt-at-sync path all need a running cluster. The

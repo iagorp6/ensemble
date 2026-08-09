@@ -1,5 +1,8 @@
 # ensemble
 
+[![score](https://github.com/iagorp6/ensemble/actions/workflows/score.yml/badge.svg)](https://github.com/iagorp6/ensemble/actions/workflows/score.yml)
+[![soundcheck](https://github.com/iagorp6/ensemble/actions/workflows/soundcheck.yml/badge.svg)](https://github.com/iagorp6/ensemble/actions/workflows/soundcheck.yml)
+
 A personal Internal Developer Platform. Seven tools wired into one path that
 runs from *nothing exists* to *the change I merged is running in production,
 being watched, and explaining its own failures in plain English*.
@@ -51,7 +54,8 @@ What has actually run:
   `linux/arm64` from one x86 runner, no QEMU) with a verifiable provenance
   attestation. `cue` has written three image digests back into
   `conductor/manifests/` on its own.
-- **`maestro`'s 22 tests pass**, and **`score`'s 26**.
+- **`score`'s 32 cases pass** (12 test functions, 20 of them table-driven
+  subtests), and **`maestro`'s 22**.
 - **`backstage` does a real SOPS round trip** — encrypt, decrypt, denied
   without the key, MAC failure on a tampered byte.
 - **[`soundcheck`](.github/workflows/soundcheck.yml) re-checks all of it on

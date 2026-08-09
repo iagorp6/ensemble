@@ -428,7 +428,8 @@ raw path leaks into a label.
 
 ### Verification
 
-Locally: 20 tests, `go vet` and `gofmt` clean on Go 1.26; cross-compilation
+Locally: 32 cases across 12 test functions, `go vet` and `gofmt` clean on Go
+1.26; cross-compilation
 confirmed for both architectures with the arm64 output verified as `ELF 64-bit
 LSB executable, ARM aarch64, statically linked` (5.4 MB); `actionlint` with
 shellcheck and `hadolint` at zero findings.
@@ -611,7 +612,7 @@ since encryption is not rotation.
 Real round trip with sops 3.13.3 and age 1.3.1: encrypt leaves metadata
 readable and the value as `ENC[AES256_GCM,…]`; decrypt with the key returns the
 original; decrypt without it fails; flipping one ciphertext byte fails the MAC
-rather than silently applying. 26 Go tests pass. The Helm render was asserted
+rather than silently applying. 32 Go cases pass. The Helm render was asserted
 against for every piece of ksops wiring, and `viaductoss/ksops:v4.5.1` was
 confirmed multi-arch against the registry — the `-arm64`-suffixed tag looks
 like the right choice on an Ampere node and is the wrong one, being single-arch.

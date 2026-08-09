@@ -261,7 +261,7 @@ placeholder. The first successful `cue` replaces it.
 
 Locally, before the first push:
 
-- `gofmt`, `go vet`, and **20 passing tests** on Go 1.26
+- `gofmt`, `go vet`, and **32 passing cases** across 12 test functions on Go 1.26
 - Cross-compiled to `linux/amd64` and `linux/arm64`; the arm64 output confirmed
   as `ELF 64-bit LSB executable, ARM aarch64, statically linked`
 - `actionlint` **with shellcheck enabled**: 0 findings
