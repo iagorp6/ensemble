@@ -182,8 +182,69 @@ You'll need a free [Oracle Cloud](https://www.oracle.com/cloud/free/) account.
 Everything in this repo is designed to stay inside the Always Free tier, and
 layer 1 enforces that in code rather than trusting me to remember.
 
-Both layers run from WSL — Ansible has no supported Windows control node, so
+Run it from WSL or Linux — Ansible has no supported Windows control node, so
 there's one toolchain rather than two.
+
+### From nothing to a running platform
+
+The whole sequence, so the shape is visible without reading seven READMEs
+first. Each step's own README has the prerequisites and the reasoning.
+
+```bash
+# 1. tuning — provision the VM  (~5 min, plus retries if A1 capacity is short)
+cd tuning
+cp terraform.tfvars.example terraform.tfvars   # set tenancy_ocid
+terraform init && terraform apply
+terraform output -raw ansible_inventory > ../rehearsal/inventory.ini
+```
+
+```bash
+# 2. rehearsal — harden it and install K3s  (~8 min)
+cd ../rehearsal
+ansible-galaxy collection install -r requirements.yml
+ansible-playbook playbook.yml
+ansible-playbook playbook.yml          # proves it: changed=0
+export KUBECONFIG=$PWD/kubeconfig.podium
+```
+
+```bash
+# 3. backstage — give the cluster the decryption key  (before conductor, so the
+#    first sync can already decrypt)
+cd ../backstage
+age-keygen -o age.key                  # then update .sops.yaml + sops updatekeys
+./install-key.sh
+```
+
+```bash
+# 4. conductor — the one imperative step in the platform
+cd ../conductor/bootstrap
+./install.sh
+```
+
+Everything after that arrives by Git. `downbeat` picks up `overture`,
+`backstage`'s secrets and all four `metronome` Applications on its own, in sync
+wave order. Watch it:
+
+```bash
+kubectl -n argocd get applications -w
+```
+
+```bash
+# 5. maestro — on the workstation, not the cluster
+cd ../../maestro
+ollama pull llama3.2:3b
+cp .env.example .env && set -a && . ./.env && set +a
+./triage.py serve
+# in another terminal, so Alertmanager can reach it:
+ssh -R 0.0.0.0:9099:localhost:9099 stagehand@<node>
+```
+
+`score` needs nothing — it runs on push, and its first successful run replaces
+`overture`'s placeholder image with one it built.
+
+**Teardown** is `terraform destroy` in `tuning/`. Because
+`preserve_boot_volume = false`, the 100 GB boot volume goes with the instance
+rather than sitting in the free-tier storage grant.
 
 ---
 
@@ -216,6 +277,17 @@ not adding an eighth tool mid-build is part of the exercise.
   starts paying for itself.
 - **A second node**, to make `conductor` schedule across a real cluster instead
   of a single-node one. Blocked on the free tier, not on interest.
+- **A repo-wide validation workflow.** Every layer's README ends with what was
+  verified — `terraform validate`, `actionlint` with shellcheck, `hadolint`,
+  `kubeconform` against real CRD schemas, chart renders asserted against. All of
+  that was run by hand, once. A second GitHub Actions workflow running it on
+  every pull request would turn "I checked" into "it is checked", and it needs
+  no new tool — only the one layer 3 already uses. This is the first thing I'd
+  build next, and the only reason it isn't here is the no-scope-creep rule.
+
+The rule I set myself was to note these rather than build them. Keeping to it
+while the list grew was harder than adding any single item on it would have
+been, which is roughly the point.
 
 ## Related
 

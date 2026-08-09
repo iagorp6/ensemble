@@ -51,6 +51,15 @@ kubectl cluster-info >/dev/null 2>&1 || die "Cannot reach the cluster. Check KUB
 
 info "Installing the age private key as ${NAMESPACE}/${SECRET_NAME}"
 
+# Create the namespace if it isn't there.
+#
+# This script is deliberately runnable BEFORE conductor, so that ArgoCD's very
+# first sync can already decrypt rather than failing once and self-correcting.
+# In that order the argocd namespace does not exist yet, and `kubectl create
+# secret -n argocd` would fail with "namespaces not found" — which reads like a
+# cluster problem rather than an ordering one.
+kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
 # The key inside the Secret must be named keys.txt, because that is what
 # SOPS_AGE_KEY_FILE points at in conductor/bootstrap/values.yaml.
 #
