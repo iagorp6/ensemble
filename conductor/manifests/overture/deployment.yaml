@@ -70,7 +70,7 @@ spec:
           # be running different code, and rolling back means hoping the old
           # image still exists under a tag that has since moved.
           # ---------------------------------------------------------------
-          image: ghcr.io/iagorp6/overture:sha-64f0efa@sha256:f76b168b508e00cb35fbc6797d06a2259d99c7cf3b06d5ce02f8bb1846dc9c6c
+          image: ghcr.io/iagorp6/overture:sha-1750b18@sha256:20229fa844bf0b4c580591d7f2ebc488a255e0d2dacaf3b4f9c2976de2febe36
           imagePullPolicy: IfNotPresent
 
           ports:
