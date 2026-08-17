@@ -297,10 +297,28 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap is how http.ResponseController reaches the real ResponseWriter
+// underneath this one. Without it, wrapping quietly strips every optional
+// capability the server provides — Flush, Hijack, SetWriteDeadline — from any
+// handler added later, because a type assertion against *statusRecorder fails
+// even though the writer beneath it would have satisfied it.
+//
+// Nothing here streams today, which is exactly why this is worth one line now:
+// the failure mode is a handler that works standalone and silently buffers
+// forever once it's behind the middleware.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 func instrument(reg *registry, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+		// Set on every response, including /metrics, before the handler can
+		// write. Both content types this service emits are unambiguous — but
+		// MIME sniffing is how a reflected value inside a JSON error body gets
+		// rendered as HTML by a browser, and the fix costs one header set once
+		// rather than vigilance in every handler.
+		rec.Header().Set("X-Content-Type-Options", "nosniff")
 
 		next.ServeHTTP(rec, req)
 

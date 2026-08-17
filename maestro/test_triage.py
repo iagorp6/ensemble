@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import os
 import unittest
+import urllib.error
+import urllib.parse
 from unittest import mock
 
 import triage
@@ -48,6 +50,20 @@ class TestClamp(unittest.TestCase):
         # A single JSON blob of a megabyte would slip past the line cap.
         out = triage.clamp("x" * (triage.MAX_LOG_CHARS * 2))
         self.assertLessEqual(len(out), triage.MAX_LOG_CHARS + 100)
+
+    def test_banner_names_the_cap_that_actually_fired(self):
+        # One enormous line trips the character cap and NOT the line cap. The
+        # banner has to say so: an excerpt that misdescribes what was removed
+        # from it is worse than one that says nothing, because the model and the
+        # human both reason about the gap.
+        out = triage.clamp("x" * (triage.MAX_LOG_CHARS * 2))
+        self.assertIn("characters", out.splitlines()[0])
+        self.assertNotIn("lines", out.splitlines()[0])
+
+        # And the reverse: many short lines trip only the line cap.
+        many = "\n".join(str(i) for i in range(triage.MAX_LOG_LINES + 10))
+        self.assertIn("lines", triage.clamp(many).splitlines()[0])
+        self.assertNotIn("characters", triage.clamp(many).splitlines()[0])
 
 
 class TestRender(unittest.TestCase):
@@ -175,6 +191,53 @@ class TestOllamaFailureIsSurvivable(unittest.TestCase):
         self.assertIn("could not reach Ollama", out)
 
 
+class TestEnvInt(unittest.TestCase):
+    """Settings come from the environment, so they can be anything."""
+
+    def test_unset_uses_the_default(self):
+        with mock.patch.dict(os.environ, {"OLLAMA_TIMEOUT": ""}, clear=False):
+            self.assertEqual(triage.env_int("OLLAMA_TIMEOUT", 180), 180)
+
+    def test_valid_value_is_read(self):
+        with mock.patch.dict(os.environ, {"OLLAMA_TIMEOUT": "30"}, clear=False):
+            self.assertEqual(triage.env_int("OLLAMA_TIMEOUT", 180), 30)
+
+    def test_garbage_falls_back_instead_of_raising(self):
+        # A typo must not surface as a ValueError at the moment an alert
+        # arrives, which is the only moment it would.
+        with mock.patch.dict(os.environ, {"OLLAMA_TIMEOUT": "3 minutes"}, clear=False):
+            with mock.patch("sys.stderr"):
+                self.assertEqual(triage.env_int("OLLAMA_TIMEOUT", 180), 180)
+
+
+class TestLogQLEscaping(unittest.TestCase):
+    """Label values come from the webhook, so they are not ours to trust."""
+
+    def test_plain_value_is_unchanged(self):
+        self.assertEqual(triage.logql_value("overture"), "overture")
+
+    def test_quote_and_backslash_are_escaped(self):
+        self.assertEqual(triage.logql_value('a"b'), 'a\\"b')
+        self.assertEqual(triage.logql_value("a\\b"), "a\\\\b")
+
+    def test_a_quote_in_a_label_cannot_break_out_of_the_matcher(self):
+        # Without escaping this closes the matcher early and Loki rejects the
+        # whole query — which surfaces as "maestro could not query Loki" and
+        # sends you to debug Loki instead of this line.
+        captured = {}
+
+        def fake_urlopen(url, timeout=None):
+            captured["url"] = url
+            raise urllib.error.URLError("stop here")
+
+        with mock.patch.dict(os.environ, {"LOKI_URL": "http://localhost:3100"}, clear=False), \
+             mock.patch("urllib.request.urlopen", fake_urlopen):
+            triage.fetch_logs('over"ture', 'pod"1')
+
+        sent = urllib.parse.parse_qs(urllib.parse.urlparse(captured["url"]).query)["query"][0]
+        self.assertEqual(sent, '{namespace="over\\"ture", pod="pod\\"1"}')
+
+
 class TestLokiIsOptional(unittest.TestCase):
     def test_no_loki_url_means_no_query_and_no_error(self):
         with mock.patch.dict(os.environ, {"LOKI_URL": ""}, clear=False):
@@ -204,6 +267,29 @@ class TestLokiIsOptional(unittest.TestCase):
 
         # Loki returns newest-first; a human reads an incident oldest-first.
         self.assertEqual(out.splitlines(), ["oldest", "middle", "newest"])
+
+
+class TestProcessNeverLosesAnAlert(unittest.TestCase):
+    """The 202 is already sent by the time _process runs."""
+
+    def test_a_failure_during_triage_is_still_written_as_a_note(self):
+        # Nothing downstream can report this: Alertmanager has its 202 and the
+        # worker thread has no caller. An unhandled exception here means the
+        # alert produces no note at all and nobody learns why.
+        emitted = {}
+
+        def boom(_payload):
+            raise RuntimeError("model went missing")
+
+        with mock.patch.object(triage, "summarise_alert", boom), \
+             mock.patch.object(triage, "emit", lambda note, heading: emitted.update(
+                 note=note, heading=heading)):
+            triage.Handler._process({"alerts": [{"labels": {"alertname": "OvertureDown"}}]})
+
+        self.assertIn("maestro failed", emitted["note"])
+        self.assertIn("model went missing", emitted["note"])
+        # And it still says which alert it was about.
+        self.assertIn("OvertureDown", emitted["heading"])
 
 
 if __name__ == "__main__":

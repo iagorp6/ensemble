@@ -171,7 +171,13 @@ func (r *registry) render() string {
 		// rejects a histogram without it.
 		fmt.Fprintf(&b, "%s_request_duration_seconds_bucket{path=\"%s\",le=\"+Inf\"} %d\n",
 			namespace, escapeLabel(p), r.count[p])
-		fmt.Fprintf(&b, "%s_request_duration_seconds_sum{path=\"%s\"} %f\n", namespace, escapeLabel(p), r.sum[p])
+		// 'g' with precision -1 rather than %f: it emits the shortest string
+		// that round-trips back to the same float64. %f is fixed at six decimal
+		// places, so a service answering in microseconds would report a sum of
+		// "0.000000" — a number that reads as working and quietly makes every
+		// derived average zero.
+		fmt.Fprintf(&b, "%s_request_duration_seconds_sum{path=\"%s\"} %s\n",
+			namespace, escapeLabel(p), strconv.FormatFloat(r.sum[p], 'g', -1, 64))
 		fmt.Fprintf(&b, "%s_request_duration_seconds_count{path=\"%s\"} %d\n", namespace, escapeLabel(p), r.count[p])
 	}
 

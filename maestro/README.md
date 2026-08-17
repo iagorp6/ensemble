@@ -186,10 +186,16 @@ Or check it's alive: `curl localhost:9099/healthz`.
 
 ## Verified
 
-- **22 tests pass** (`python3 -m unittest discover maestro`), none of which need
+- **30 tests pass** (`python3 -m unittest discover maestro`), none of which need
   Ollama running — a suite that requires a 2 GB model loaded is a suite nobody
   runs
-- Truncation keeps the tail, announces itself, and catches a single huge line
+- Truncation keeps the tail, catches a single huge line, and names the cap that
+  actually fired rather than the one that didn't
+- Label values from the webhook are escaped before they reach a LogQL matcher,
+  so a quote in an alert label cannot malform the Loki query
+- Numeric settings fall back with a warning instead of raising, and a failure
+  during triage is still written out as a note — the 202 has already been sent,
+  so nothing else could report it
 - Both prompts still declare their content untrusted
 - Token auth: correct accepted; wrong, prefix, missing, wrong-scheme and
   unconfigured all rejected

@@ -67,6 +67,12 @@ PROMPTS = Path(__file__).parent / "prompts"
 MAX_LOG_LINES = 200
 MAX_LOG_CHARS = 12_000
 
+# Cap on an inbound webhook body. Alertmanager groups alerts, so a real payload
+# is a few kilobytes; a megabyte is already absurd. The read happens after
+# authentication, so this is not the front line — it is the difference between
+# a bad caller getting a 413 and this process holding an arbitrary allocation.
+MAX_BODY_BYTES = 1_000_000
+
 
 # =============================================================================
 # Config
@@ -74,6 +80,23 @@ MAX_LOG_CHARS = 12_000
 
 def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+def env_int(name: str, default: int) -> int:
+    """Read an integer setting, warning and falling back rather than raising.
+
+    A typo in OLLAMA_TIMEOUT should not take maestro down with a ValueError,
+    because the moment it would surface is the moment an alert arrives — which
+    is the one moment this tool is supposed to be dependable.
+    """
+    raw = env(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"warning: {name}={raw!r} is not a number; using {default}", file=sys.stderr)
+        return default
 
 
 def ollama_url() -> str:
@@ -114,7 +137,7 @@ def ask(prompt: str) -> str:
         method="POST",
     )
 
-    timeout = int(env("OLLAMA_TIMEOUT", "180"))
+    timeout = env_int("OLLAMA_TIMEOUT", 180)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.load(resp).get("response", "").strip()
@@ -134,6 +157,21 @@ def ask(prompt: str) -> str:
 # Loki (optional)
 # =============================================================================
 
+def logql_value(value: str) -> str:
+    """Escape a value for use inside a LogQL label matcher.
+
+    `namespace` and `pod` arrive in an Alertmanager webhook, which is to say
+    from outside this process. A value carrying a quote or a backslash would
+    otherwise close the matcher early and produce a query Loki rejects — and
+    the visible symptom would be "maestro could not query Loki", sending you to
+    look at Loki when the problem is here.
+
+    Same reasoning, and the same three characters, as escapeLabel in
+    score/metrics.go.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def fetch_logs(namespace: str, pod: str = "") -> str:
     """Pull recent lines from Loki, if LOKI_URL is set.
 
@@ -145,10 +183,12 @@ def fetch_logs(namespace: str, pod: str = "") -> str:
     if not base or not namespace:
         return ""
 
-    selector = f'{{namespace="{namespace}"}}' if not pod else f'{{namespace="{namespace}", pod="{pod}"}}'
+    selector = f'{{namespace="{logql_value(namespace)}"}}'
+    if pod:
+        selector = f'{{namespace="{logql_value(namespace)}", pod="{logql_value(pod)}"}}'
     query = urllib.parse.urlencode({
         "query": selector,
-        "limit": env("LOKI_LINES", "200"),
+        "limit": env_int("LOKI_LINES", 200),
         "direction": "backward",
     })
 
@@ -176,21 +216,27 @@ def clamp(text: str) -> str:
     if not text:
         return "(none available)"
 
+    # Both caps are reported separately, and only when they actually fired. A
+    # banner that says "the most recent 200 lines" after a single megabyte-long
+    # JSON blob was cut mid-way describes a truncation that did not happen — and
+    # the one thing an excerpt handed to a model must be is honest about what is
+    # missing from it.
+    applied: list[str] = []
+
     lines = text.splitlines()
-    dropped_lines = 0
     if len(lines) > MAX_LOG_LINES:
-        dropped_lines = len(lines) - MAX_LOG_LINES
         # Keep the TAIL. In an incident the most recent lines are the ones that
         # matter; the beginning of a crash loop is the same as its middle.
         lines = lines[-MAX_LOG_LINES:]
+        applied.append(f"the most recent {MAX_LOG_LINES} lines")
 
     out = "\n".join(lines)
     if len(out) > MAX_LOG_CHARS:
         out = out[-MAX_LOG_CHARS:]
-        dropped_lines += 1
+        applied.append(f"the last {MAX_LOG_CHARS} characters")
 
-    if dropped_lines:
-        out = f"[truncated to the most recent {MAX_LOG_LINES} lines]\n{out}"
+    if applied:
+        out = f"[truncated to {' and '.join(applied)}]\n{out}"
     return out
 
 
@@ -253,19 +299,28 @@ def summarise_logs(text: str) -> str:
 # Output
 # =============================================================================
 
+# The webhook server answers on one thread and does inference on another, so two
+# notes can finish at once — the common case being an Alertmanager group that
+# fires several alerts together. Without this lock their paragraphs interleave
+# line by line in both stdout and the notes file, and the record of an incident
+# is unreadable at exactly the moment it is worth reading.
+_emit_lock = threading.Lock()
+
+
 def emit(note: str, heading: str) -> None:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     block = f"\n## {stamp} — {heading}\n\n{note}\n"
 
-    print(block, flush=True)
+    with _emit_lock:
+        print(block, flush=True)
 
-    path = env("MAESTRO_LOG")
-    if path:
-        # Append, never rewrite. The value of these notes is comparative —
-        # "this is the third time this week" is the sentence that leads to a
-        # fix, and it only exists if the earlier ones are still there.
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(block)
+        path = env("MAESTRO_LOG")
+        if path:
+            # Append, never rewrite. The value of these notes is comparative —
+            # "this is the third time this week" is the sentence that leads to a
+            # fix, and it only exists if the earlier ones are still there.
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(block)
 
 
 # =============================================================================
@@ -316,7 +371,19 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        length = int(self.headers.get("Content-Length", "0") or 0)
+        # Parse the length before trusting it. A malformed Content-Length is a
+        # 400, not a ValueError escaping into BaseHTTPRequestHandler — which
+        # answers with a bare 500 and a traceback on stderr, burying the notes
+        # this server exists to print.
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            self._json(400, {"error": "Content-Length is not a number"})
+            return
+        if length > MAX_BODY_BYTES:
+            self._json(413, {"error": f"body exceeds {MAX_BODY_BYTES} bytes"})
+            return
+
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:
@@ -350,9 +417,20 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _process(payload: dict) -> None:
         started = time.monotonic()
-        note = summarise_alert(payload)
+        first = "alert"
+        try:
+            first = (payload.get("alerts") or [{}])[0].get("labels", {}).get("alertname", "alert")
+            note = summarise_alert(payload)
+        except Exception as exc:  # noqa: BLE001  (see below)
+            # The 202 has already been sent, so an exception here has nowhere to
+            # go: the thread dies, Alertmanager is satisfied, and the alert
+            # silently produces no note at all. Printing the failure as a note
+            # keeps the record complete and says which alert it belonged to.
+            #
+            # Broad on purpose. The payload is arbitrary JSON from the network
+            # and this is the last frame that can report anything.
+            note = f"[maestro failed while triaging this alert: {type(exc).__name__}: {exc}]"
         elapsed = time.monotonic() - started
-        first = (payload.get("alerts") or [{}])[0].get("labels", {}).get("alertname", "alert")
         emit(note, f"{first} ({elapsed:.0f}s, {model()})")
 
     def log_message(self, fmt: str, *args) -> None:
@@ -363,8 +441,16 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve() -> int:
     addr = env("MAESTRO_ADDR", "127.0.0.1:9099")
-    host, _, port = addr.rpartition(":")
+    host, sep, port_text = addr.rpartition(":")
     host = host or "127.0.0.1"
+
+    # Refuse a malformed address with a sentence rather than a traceback. The
+    # usual mistake is a bare port or a bare host, and both are easier to see
+    # named than inferred from `invalid literal for int()`.
+    if not sep or not port_text.isdigit():
+        print(f"error: MAESTRO_ADDR must be host:port, got {addr!r}", file=sys.stderr)
+        return 2
+    port = int(port_text)
 
     if not env("MAESTRO_TOKEN"):
         print("warning: MAESTRO_TOKEN is not set — /alert will refuse everything", file=sys.stderr)

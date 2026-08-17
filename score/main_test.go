@@ -294,6 +294,66 @@ func TestMetricsLabelUsesRoutePatternNotRawPath(t *testing.T) {
 	}
 }
 
+// Every response, not just the JSON ones. A browser that MIME-sniffs an error
+// body is how a reflected value becomes script execution, and the header is
+// only useful if nothing can be served without it.
+func TestEveryResponseSetsNosniff(t *testing.T) {
+	ready.Store(true)
+	t.Cleanup(func() { ready.Store(false) })
+
+	h := routes(newRegistry(), testToken)
+
+	for _, path := range []string{"/", "/healthz", "/readyz", "/metrics", "/private"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("GET %s: X-Content-Type-Options is %q, want %q", path, got, "nosniff")
+		}
+	}
+}
+
+// The middleware wraps http.ResponseWriter, and a wrapper without Unwrap hides
+// every optional capability the real writer had. Nothing streams today — this
+// asserts that the day something does, it works, rather than buffering silently
+// because a type assertion failed two layers up.
+func TestInstrumentedWriterStillSupportsFlush(t *testing.T) {
+	reg := newRegistry()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /stream", func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := w.Write([]byte("first\n")); err != nil {
+			t.Errorf("write: %v", err)
+			return
+		}
+		// Panics if the wrapper does not expose the underlying Flusher.
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Errorf("Flush through the middleware failed: %v", err)
+		}
+	})
+
+	rec := httptest.NewRecorder()
+	instrument(reg, mux).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/stream", nil))
+
+	if !rec.Flushed {
+		t.Error("the response was never flushed; statusRecorder is hiding the Flusher")
+	}
+}
+
+// A sum reported at six fixed decimals is zero for anything faster than a
+// microsecond, and a zero sum makes every average derived from it zero too.
+func TestDurationSumKeepsPrecision(t *testing.T) {
+	reg := newRegistry()
+	reg.observe("GET", "/", "2xx", 400*time.Nanosecond)
+
+	out := reg.render()
+	if strings.Contains(out, `overture_request_duration_seconds_sum{path="/"} 0.000000`) {
+		t.Errorf("sub-microsecond latency rounded away to zero\n--- got ---\n%s", out)
+	}
+	if !strings.Contains(out, `overture_request_duration_seconds_sum{path="/"} 4e-07`) {
+		t.Errorf("sum not reported at full precision\n--- got ---\n%s", out)
+	}
+}
+
 func TestStatusBucketing(t *testing.T) {
 	tests := []struct {
 		code int
