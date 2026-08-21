@@ -183,9 +183,20 @@ point, and a test is how a habit survives.
 |---|---|---|
 | The **app** image, in `conductor/manifests/` | **digest** (`:tag@sha256:…`) | A rollback has to restore the exact bytes that worked. Immutability is the whole point. |
 | The **base** image, in the Dockerfile | **tag** (`:nonroot`) | It should absorb security patches. A digest freezes it, and without Renovate opening update PRs, "pinned" quietly becomes "unpatched forever". |
+| The **actions**, in `.github/workflows/` | **commit SHA**, with the version in a trailing comment | A version tag here is a mutable pointer to code that runs inside this pipeline holding its token. `tj-actions/changed-files` had its tags rewritten in March 2025 and leaked secrets out of thousands of repositories that had done nothing wrong. |
 
-Opposite requirements, different answers. Adding Renovate — noted in the root
-README's *what I'd add next* — is what would let the base be pinned too.
+Three artifacts, three answers, and the third one deliberately cuts against the
+second. A base image tag absorbs patches from a publisher whose registry is the
+thing being trusted. An action tag is a label a compromised maintainer can
+repoint at code that runs with `packages: write` and an OIDC token, which is a
+different question wearing the same clothes.
+
+The cost is honest and it is the base image row's own argument turned around:
+SHA pins go stale, and nothing here opens a PR when `checkout` ships a fix.
+Adding Renovate, noted in the root README's *what I'd add next*, is what would
+let the base be pinned too and keep these current. Until then the pins are
+reviewed by hand, and the trailing `# v7.0.1` comments exist so that review is
+possible without resolving ten hashes first.
 
 ---
 

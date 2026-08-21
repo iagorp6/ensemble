@@ -288,6 +288,7 @@ not adding an eighth tool mid-build is part of the exercise.
   starts paying for itself.
 - **A second node**, to make `conductor` schedule across a real cluster instead
   of a single-node one. Blocked on the free tier, not on interest.
+
 The rule I set myself was to note these rather than build them. Keeping to it
 while the list grew was harder than adding any single item on it would have
 been, which is roughly the point.

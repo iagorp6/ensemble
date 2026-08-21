@@ -1,0 +1,31 @@
+# Line endings are the reason this file exists. The control machine is Windows
+# with core.autocrlf=true; everything this repo produces runs on Linux. The
+# .gitattributes rule already forces LF at commit time, but that fires after an
+# editor has already written the file, which means a CRLF can sit in the working
+# tree long enough to be run. This settles it at the point of writing instead.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Go's toolchain formats with tabs, and gofmt will undo anything else.
+[*.go]
+indent_style = tab
+indent_size = 4
+
+[*.{py,tf,tfvars}]
+indent_size = 4
+
+# Tabs are syntactically meaningful in a recipe line.
+[Makefile]
+indent_style = tab
+
+# Markdown uses two trailing spaces as a hard line break, so stripping them
+# silently changes how a document renders.
+[*.md]
+trim_trailing_whitespace = false
