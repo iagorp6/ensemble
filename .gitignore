@@ -103,6 +103,12 @@ __pycache__/
 .venv/
 venv/
 
+# pytest writes a self-ignoring .gitignore inside its own cache, so this
+# line is redundant today. It is here because that behaviour is pytest's to
+# change, and a stray cache directory in a commit is a silly way to find out
+# that it did.
+.pytest_cache/
+
 # Holds MAESTRO_TOKEN — the same value backstage encrypts for Alertmanager.
 # The committed template is maestro/.env.example.
 .env
