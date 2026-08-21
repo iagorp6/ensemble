@@ -395,3 +395,22 @@ Worth doing between working sessions if you're near the free-tier line. Worth
 *not* doing once layer 2 has configured the node, since rebuilding means
 re-running `rehearsal` — which is exactly the situation idempotent configuration
 management exists for, and a fine excuse to prove it works.
+
+---
+
+## Verified
+
+`soundcheck` runs these on every push, and they pass:
+
+- `terraform fmt -check -recursive -diff`, clean
+- `terraform init -backend=false` then `terraform validate` against the real OCI
+  provider, so the resource schemas are checked rather than assumed
+- The **14 `validation` blocks in `variables.tf`**, which are what keep the
+  free-tier envelope honest. They fail at plan time with a sentence, which is
+  the point of putting a guardrail in code instead of in this file.
+
+**Not verified:** no instance has ever existed. `terraform apply` has not run, so
+A1 capacity behaviour, cloud-init, the SSH path, and the `ansible_inventory`
+output that `rehearsal` consumes are all unproven. Everything above says the
+configuration is well-formed and self-limiting. None of it says Oracle accepted
+it.

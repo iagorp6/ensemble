@@ -337,3 +337,20 @@ in-guest firewall from a console session or by rebuilding with
 On this platform, rule out architecture first. An amd64 image on an aarch64
 node crash-loops with `exec format error`. That's the constraint layer 1's
 shape choice propagated, and it's the single most likely cause here.
+
+---
+
+## Verified
+
+`soundcheck` runs these on every push, and they pass:
+
+- `ansible-lint` at the **`production` profile**, the strictest one, with the
+  collections from `requirements.yml` installed first so module names resolve
+  against the real collection instead of being skipped as unknown
+- `ansible-playbook --syntax-check` against `inventory.example.ini`, which
+  proves all seven roles parse and are reachable from `playbook.yml`
+
+**Not verified:** there is no host to run against. The playbook has never
+executed, so the claim this README cares about most, that a second run reports
+`changed=0`, is unproven. So are the hardening outcomes, the K3s install, and
+the kubeconfig this layer is supposed to hand back to the operator.

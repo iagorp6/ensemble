@@ -308,3 +308,22 @@ scheduler reserves.
 - **Layer 6 (`metronome`)** — an app-of-apps root that will deploy the
   observability stack from one committed file, and an app already annotated for
   Prometheus scraping.
+
+---
+
+## Verified
+
+`soundcheck` runs these on every push, and they pass:
+
+- `kubeconform -strict` over `conductor/`, against real Kubernetes OpenAPI
+  schemas **plus the CRD catalog**, so ArgoCD's own `Application` kind is
+  actually checked. Without that second schema source those objects are skipped
+  silently, and a silent skip is how a manifest passes without being read.
+- The `argo-cd` chart at **10.3.0** rendered with this repo's values, with the
+  output validated the same way
+
+**Not verified:** ArgoCD has never synced. The `downbeat` app-of-apps, the sync
+wave ordering, self-heal and prune are the whole argument of this layer, and
+none of them have been observed. What is proven is that the manifests ArgoCD
+would read are schema-valid, which is a claim about this repo and not about a
+cluster.
